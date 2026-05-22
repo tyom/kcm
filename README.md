@@ -1,6 +1,6 @@
 # KCM - Keychain Master
 
-[![Tests](https://github.com/tyom/homebrew-kcm/actions/workflows/test.yml/badge.svg)](https://github.com/tyom/homebrew-kcm/actions/workflows/test.yml)
+[![Tests](https://github.com/tyom/kcm/actions/workflows/test.yml/badge.svg)](https://github.com/tyom/kcm/actions/workflows/test.yml)
 
 A secure command-line utility for managing secrets in macOS Keychain with seamless `.env` file integration.
 
@@ -18,18 +18,20 @@ A secure command-line utility for managing secrets in macOS Keychain with seamle
 ### Using Homebrew
 
 ```bash
-# Add the tap
-brew tap tyom/kcm
-
-# Install kcm
-brew install kcm
+brew install tyom/tap/kcm
 ```
+
+> Previously installed from the `tyom/kcm` tap? Switch over with:
+>
+> ```bash
+> brew untap tyom/kcm && brew install tyom/tap/kcm
+> ```
 
 ### Manual Installation
 
 ```bash
 # Download the script
-curl -O https://raw.githubusercontent.com/tyom/homebrew-kcm/main/kcm
+curl -O https://raw.githubusercontent.com/tyom/kcm/main/kcm
 
 # Make it executable
 chmod +x kcm

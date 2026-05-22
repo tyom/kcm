@@ -1,21 +1,18 @@
 #!/bin/bash
-# Script to create a new release and update the formula
+# Script to create a new release: bump the version in `kcm`, commit, tag, and push.
+# Pushing the tag triggers the Release workflow, which creates the GitHub release
+# (with the `kcm` asset) and bumps Formula/kcm.rb in tyom/homebrew-tap.
 
 set -euo pipefail
 
 # Parse arguments
 DRY_RUN=false
-CI_MODE=false
 VERSION=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --dry-run)
             DRY_RUN=true
-            shift
-            ;;
-        --ci)
-            CI_MODE=true
             shift
             ;;
         *)
@@ -26,10 +23,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$VERSION" ]; then
-    echo "Usage: $0 [--dry-run] [--ci] <version>"
-    echo "Example: $0 0.1.1"
-    echo "Example: $0 --dry-run 0.1.1"
-    echo "Example: $0 --ci 0.4.0  # CI mode: only update Homebrew formula SHA256"
+    echo "Usage: $0 [--dry-run] <version>"
+    echo "Example: $0 0.5.0"
+    echo "Example: $0 --dry-run 0.5.0"
     exit 1
 fi
 
@@ -38,13 +34,8 @@ if [ "$DRY_RUN" = true ]; then
     echo ""
 fi
 
-if [ "$CI_MODE" = true ]; then
-    echo "CI MODE - Only updating Homebrew formula SHA256"
-    echo ""
-else
-    echo "Creating release v${VERSION}..."
-    echo ""
-fi
+echo "Creating release v${VERSION}..."
+echo ""
 
 # Detect sed type for portability (BSD vs GNU)
 if sed --version >/dev/null 2>&1; then
@@ -55,65 +46,39 @@ else
     SED_INPLACE=(sed -i '')
 fi
 
-# In CI mode, only update formula with SHA256 from GitHub tarball
-if [ "$CI_MODE" = true ]; then
-    # Get the SHA256 of the release tarball
-    echo "Calculating SHA256 for release tarball..."
-    TARBALL_URL="https://github.com/tyom/kcm/archive/refs/tags/v${VERSION}.tar.gz"
-
-    echo "  Waiting for GitHub to generate the tarball..."
-    sleep 2
-
-    echo "  Downloading tarball from: $TARBALL_URL"
-
-    # Download and calculate SHA256 (use secure temp file)
-    TEMP_FILE=$(mktemp)
-    trap "rm -f '$TEMP_FILE'" EXIT
-    curl -sL "$TARBALL_URL" -o "$TEMP_FILE"
-    SHA256=$(shasum -a 256 "$TEMP_FILE" | awk '{print $1}')
-    rm -f "$TEMP_FILE"
-
-    echo "  SHA256: $SHA256"
-
-    # Generate final formula from template with correct SHA256
-    echo "Updating Formula/kcm.rb with SHA256..."
-    sed -e "s/{{VERSION}}/${VERSION}/g" -e "s/{{SHA256}}/${SHA256}/g" Formula/kcm.rb.template > Formula/kcm.rb
+# Update version in kcm script
+echo "Updating version in kcm script..."
+if [ "$DRY_RUN" = true ]; then
+    echo "  Would update VERSION and header comment to ${VERSION}"
 else
-    # Local development mode: update version and create tag
-    # Update version in kcm script
-    echo "Updating version in kcm script..."
-    if [ "$DRY_RUN" = true ]; then
-        echo "  Would update VERSION and header comment to ${VERSION}"
-    else
-        "${SED_INPLACE[@]}" "s/^VERSION=\".*\"/VERSION=\"${VERSION}\"/" kcm
-        "${SED_INPLACE[@]}" "s/^# Version: .*/# Version: ${VERSION}/" kcm
-    fi
+    "${SED_INPLACE[@]}" "s/^VERSION=\".*\"/VERSION=\"${VERSION}\"/" kcm
+    "${SED_INPLACE[@]}" "s/^# Version: .*/# Version: ${VERSION}/" kcm
+fi
 
-    # Commit changes
-    echo "Committing changes..."
-    if [ "$DRY_RUN" = true ]; then
-        echo "  Would commit: kcm"
-        echo "  Message: Release v${VERSION}"
-    else
-        git add kcm
-        # Check if there are actual changes to commit
-        if git diff --cached --quiet; then
-            echo "  No changes to commit - files already at version ${VERSION}"
-            echo "  Skipping tag creation and push"
-            exit 0
-        fi
-        git commit -m "Release v${VERSION}"
+# Commit changes
+echo "Committing changes..."
+if [ "$DRY_RUN" = true ]; then
+    echo "  Would commit: kcm"
+    echo "  Message: Release v${VERSION}"
+else
+    git add kcm
+    # Check if there are actual changes to commit
+    if git diff --cached --quiet; then
+        echo "  No changes to commit - files already at version ${VERSION}"
+        echo "  Skipping tag creation and push"
+        exit 0
     fi
+    git commit -m "Release v${VERSION}"
+fi
 
-    # Create and push tag
-    echo "Creating and pushing tag..."
-    if [ "$DRY_RUN" = true ]; then
-        echo "  Would create tag: v${VERSION}"
-        echo "  Would push: origin main --tags"
-    else
-        git tag -a "v${VERSION}" -m "Release v${VERSION}"
-        git push origin main --tags
-    fi
+# Create and push tag
+echo "Creating and pushing tag..."
+if [ "$DRY_RUN" = true ]; then
+    echo "  Would create tag: v${VERSION}"
+    echo "  Would push: origin main --tags"
+else
+    git tag -a "v${VERSION}" -m "Release v${VERSION}"
+    git push origin main --tags
 fi
 
 echo ""
@@ -122,13 +87,11 @@ if [ "$DRY_RUN" = true ]; then
     echo ""
     echo "To perform the actual release, run:"
     echo "  $0 ${VERSION}"
-elif [ "$CI_MODE" = true ]; then
-    echo "CI mode complete - Homebrew formula updated with SHA256"
 else
     echo "Release v${VERSION} created successfully!"
     echo ""
-    echo "Users can now install/upgrade with:"
-    echo "  brew tap tyom/kcm"
-    echo "  brew install kcm"
+    echo "The Release workflow will publish the GitHub release and bump the"
+    echo "Homebrew formula in tyom/homebrew-tap. Users can then install/upgrade with:"
+    echo "  brew install tyom/tap/kcm"
     echo "  brew upgrade kcm"
 fi

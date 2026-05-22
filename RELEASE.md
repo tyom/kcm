@@ -22,12 +22,12 @@ Triggered by tag push (`v*`)
 - Runs `test_kcm.sh` on macOS
 
 **Release job** (after tests pass):
-1. Downloads GitHub's release tarball
-2. Calculates SHA256 from tarball
-3. Generates `Formula/kcm.rb` from template with version + SHA256
-4. Commits `Formula/kcm.rb` to main
-5. Pushes to main
-6. Creates GitHub release with install instructions
+1. Creates the GitHub release, attaching the `kcm` script as the release asset
+2. Computes the SHA256 of the `kcm` asset
+3. Clones [`tyom/homebrew-tap`](https://github.com/tyom/homebrew-tap) (using the
+   `HOMEBREW_TAP_TOKEN` secret) and updates `Formula/kcm.rb` with the new
+   `url`, `version`, and `sha256`
+4. Commits and pushes the formula bump to the tap
 
 ## Dry Run
 
@@ -39,6 +39,7 @@ Shows what would happen without making changes.
 
 ## Notes
 
-- `kcm` version updated locally before tag
-- `Formula/kcm.rb` generated in CI from GitHub's actual tarball
-- Ensures Homebrew formula SHA256 matches GitHub's release tarball
+- The Homebrew formula lives in [`tyom/homebrew-tap`](https://github.com/tyom/homebrew-tap),
+  not in this repo. It is bumped automatically by the Release workflow — never hand-edit it.
+- Requires a `HOMEBREW_TAP_TOKEN` repository secret: a token with write access to
+  `tyom/homebrew-tap`.
