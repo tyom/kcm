@@ -66,8 +66,11 @@ DATABASE_URL="keychain://DATABASE_URL"
 Run any command with secrets from your `.env` file automatically resolved:
 
 ```bash
-# Use default .env file
+# Find and merge .env files automatically
 kcm use -- npm run dev
+
+# Load .env.production instead of .env.development
+NODE_ENV=production kcm use -- node server.js
 
 # Specify a custom env file
 kcm use --env-file .env.production -- node server.js
@@ -75,6 +78,23 @@ kcm use --env-file .env.production -- node server.js
 # Access resolved variables in scripts
 kcm use -- bash -c 'echo $DATABASE_URL'
 ```
+
+Without `--env-file`, `kcm use` searches from the current folder up to the git root (the folder with `.git`). In each folder it looks for:
+
+| File | Priority |
+| --- | --- |
+| `.env.<mode>.local` | highest |
+| `.env.local` | |
+| `.env.<mode>` | |
+| `.env` | lowest |
+
+`<mode>` is `$NODE_ENV`, or `development` if unset. kcm merges every file it finds, and a closer folder wins over a parent folder, so in a monorepo `apps/web/.env.local` overrides the root `.env`. Outside a git repo, kcm only checks the current folder. It prints the files it loaded to stderr:
+
+```
+ℹ Loaded ./.env.local, ../../.env
+```
+
+`--env-file` loads exactly one file and skips the search.
 
 ### Managing Secrets
 

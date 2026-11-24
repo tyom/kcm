@@ -304,6 +304,37 @@ output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo $1 $2' -- "a
 assert_equals "arg1 arg2" "$output" "Arguments passed correctly"
 
 echo
+echo "Test Group: Env File Discovery"
+echo "------------------------------"
+
+# Monorepo layout: outside/.env must never load (above the .git root)
+MONO="$TEST_DIR/outside/repo"
+mkdir -p "$MONO/.git" "$MONO/apps/web"
+echo "ABOVE_ROOT=leaked" > "$TEST_DIR/outside/.env"
+printf 'SHARED=root\nROOT_ONLY=root\n' > "$MONO/.env"
+printf 'SHARED=web\nWEB_ONLY=web\n' > "$MONO/apps/web/.env.local"
+
+# Test 24: Merge files up to the git root, closest wins
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- bash -c 'echo "$SHARED $ROOT_ONLY $WEB_ONLY"' 2>/dev/null)
+assert_equals "web root web" "$output" "Merges env files up to git root, closest wins"
+
+# Test 25: Never read above the git root
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- bash -c 'echo "[$ABOVE_ROOT]"' 2>/dev/null)
+assert_equals "[]" "$output" "Stops at git root"
+
+# Test 26: Lists loaded files on stderr, closest first
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- true 2>&1 >/dev/null)
+assert_contains "$output" "Loaded ./.env.local, ../../.env" "Shows loaded env files"
+
+# Test 27: NODE_ENV picks the mode file
+echo "MODE=dev" > "$MONO/.env.development"
+echo "MODE=prod" > "$MONO/.env.production"
+output=$(cd "$MONO" && "$SCRIPT_PATH" use -- bash -c 'echo "$MODE"' 2>/dev/null)
+assert_equals "dev" "$output" "Defaults to development mode"
+output=$(cd "$MONO" && NODE_ENV=production "$SCRIPT_PATH" use -- bash -c 'echo "$MODE"' 2>/dev/null)
+assert_equals "prod" "$output" "NODE_ENV=production loads .env.production"
+
+echo
 echo "Test Group: Pattern Matching"
 echo "----------------------------"
 

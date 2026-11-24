@@ -114,14 +114,21 @@ COMMANDS:
       kcm ls '*_KEY'       # List secrets ending with _KEY
 
   use [options] -- command [args...]
-    Run a command with secrets from .env file resolved
+    Run a command with secrets from .env files resolved
+
+    Without --env-file, kcm loads .env, .env.local, .env.<mode> and .env.<mode>.local
+    from the current folder up to the git root and merges them. The closest folder wins,
+    and within a folder the order is .env < .env.<mode> < .env.local < .env.<mode>.local.
+    <mode> is \$NODE_ENV (default: development).
 
     Options:
-      -e, --env-file FILE   - Specify the .env file to use (default: .env)
+      -e, --env-file FILE   - Use only this env file (skips discovery)
       -u, --allow-unsafe    - Allow special characters in env values that are normally blocked
                               for security (use with caution, only with trusted sources)
 
     Examples:
+      kcm use -- npm run dev
+      NODE_ENV=production kcm use -- node server.js
       kcm use -e .env -- npm run dev
       kcm use --env-file ../.env -- make run-server
       kcm use -e .env -- echo \$DATABASE_URL
@@ -376,6 +383,55 @@ process_env_file() {
   done < "$env_file"
 }
 
+# Parse an env file and export its variables (later calls override earlier ones)
+export_env_file() {
+  process_env_file "$1" "$2"
+  local idx
+  for idx in "${!PROCESSED_ENV_NAMES[@]}"; do
+    export "${PROCESSED_ENV_NAMES[$idx]}=${PROCESSED_ENV_VALUES[$idx]}"
+  done
+}
+
+# Find env files from the current directory up to the git root and export them.
+# Within a folder: .env < .env.<mode> < .env.local < .env.<mode>.local.
+# Across folders: the closest folder wins.
+use_discovered_env_files() {
+  local allow_unsafe="$1"
+  local mode="${NODE_ENV:-development}"
+  local names=(".env.$mode.local" ".env.local" ".env.$mode" ".env")
+  local found=()  # closest and highest priority first
+  local dir="$PWD" rel="./" name root="$PWD"
+
+  # Git root is the nearest folder with .git (a file in worktrees); without one, only check cwd
+  while [ "$root" != "/" ] && [ ! -e "$root/.git" ]; do
+    root=$(dirname "$root")
+  done
+  [ -e "$root/.git" ] || root="$PWD"
+
+  while :; do
+    for name in "${names[@]}"; do
+      [ -f "$dir/$name" ] && found+=("$rel$name")
+    done
+    [ "$dir" = "$root" ] && break
+    dir=$(dirname "$dir")
+    if [ "$rel" = "./" ]; then rel="../"; else rel="../$rel"; fi
+  done
+
+  if [ ${#found[@]} -eq 0 ]; then
+    info "Warning: no .env files found, proceeding without them"
+    return 0
+  fi
+
+  local list
+  list=$(printf '%s, ' "${found[@]}")
+  info "Loaded ${list%, }"
+
+  local i
+  for (( i=${#found[@]}-1; i>=0; i-- )); do
+    export_env_file "${found[$i]}" "$allow_unsafe"
+  done
+}
+
 # Function to use secrets from env file
 use_secrets() {
   local env_file=""
@@ -413,9 +469,14 @@ use_secrets() {
     shift
   done
 
-  # Default to .env if not specified
+  # Check if there's a command to run
+  if [ ${#args[@]} -eq 0 ]; then
+    error_exit "No command specified. Use: $SCRIPT_NAME use --env-file .env -- command [args...]"
+  fi
+
   if [ -z "$env_file" ]; then
-    env_file=".env"
+    use_discovered_env_files "$allow_unsafe"
+    exec "${args[@]}"
   fi
 
   # Basic security validation for env-file path
@@ -433,23 +494,8 @@ use_secrets() {
     fi
   fi
 
-  # Check if there's a command to run
-  if [ ${#args[@]} -eq 0 ]; then
-    error_exit "No command specified. Use: $SCRIPT_NAME use --env-file .env -- command [args...]"
-  fi
-
-  # Process the env file
   if [ -f "$env_file" ]; then
-    process_env_file "$env_file" "$allow_unsafe"
-
-    if [ ${#PROCESSED_ENV_NAMES[@]} -gt 0 ]; then
-      local idx
-      for idx in "${!PROCESSED_ENV_NAMES[@]}"; do
-        local var_name="${PROCESSED_ENV_NAMES[$idx]}"
-        local var_value="${PROCESSED_ENV_VALUES[$idx]}"
-        export "$var_name=$var_value"
-      done
-    fi
+    export_env_file "$env_file" "$allow_unsafe"
   else
     info "Warning: env file '$env_file' not found, proceeding without it"
   fi
