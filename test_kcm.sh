@@ -22,6 +22,9 @@ TEST_ENV="$TEST_DIR/.env"
 TEST_KEY="TEST_KCM_KEY_$$"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/kcm"
 
+# Discovery tests expect the default mode unless they set NODE_ENV themselves
+unset NODE_ENV
+
 # Cleanup function
 cleanup() {
     # Remove test keys from keychain (silently)
@@ -321,6 +324,12 @@ assert_equals "web root web" "$output" "Merges env files up to git root, closest
 # Test 25: Never read above the git root
 output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- bash -c 'echo "[$ABOVE_ROOT]"' 2>/dev/null)
 assert_equals "[]" "$output" "Stops at git root"
+
+# Test: Folder reached through a symlink loads files from its real parents
+ln -s apps/web "$MONO/web-link"
+output=$(cd "$MONO/web-link" && "$SCRIPT_PATH" use -- bash -c 'echo "$ROOT_ONLY"' 2>/dev/null)
+assert_equals "root" "$output" "Symlinked folder loads real parent env files"
+rm "$MONO/web-link"
 
 # Test: No command lists names and their source, never values
 output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use 2>/dev/null) && exit_code=$? || exit_code=$?

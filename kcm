@@ -401,13 +401,16 @@ discover_env_files() {
   [ "$mode" = local ] || names+=(".env.$mode")
   names+=(".env")
   local found=()  # closest and highest priority first
-  local dir="$PWD" rel="./" name root="$PWD"
+  # Physical path: relative paths like ../.env resolve from it, not from a symlinked $PWD
+  local dir rel="./" name root
+  dir=$(pwd -P)
+  root="$dir"
 
   # Git root is the nearest folder with .git (a file in worktrees); without one, only check cwd
   while [ "$root" != "/" ] && [ ! -e "$root/.git" ]; do
     root="${root%/*}"; root="${root:-/}"
   done
-  [ -e "$root/.git" ] || root="$PWD"
+  [ -e "$root/.git" ] || root="$dir"
 
   while :; do
     for name in "${names[@]}"; do
