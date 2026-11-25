@@ -799,7 +799,8 @@ rewrite_env_file() {
       [[ "$line" == *$'\r' ]] && out="$out"$'\r'
       break
     done
-    printf '%s\n' "$out"
+    # The loop's status is only its last command's, so check every write
+    printf '%s\n' "$out" || { rm -f "$tmp"; return 1; }
   done < "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
   # shortcut: mv replaces a symlinked env file with a regular file; resolve links if that comes up
   # /usr/bin/stat: GNU stat from coreutils takes different flags. -L: the mode of the file read, not of a link
@@ -1054,16 +1055,21 @@ import_secrets() {
     fi
   done
 
-  # The prompts give another process time to change a kept entry: check it still holds that value
+  # Check each entry still holds the value its reference stands for: the prompts give another
+  # process time to change a kept entry, and a later pick in this run can overwrite a stored one
   local got
   for (( i=0; i<n; i++ )); do
-    [ "${actions[i]}" = ref ] || continue
+    case "${actions[i]}" in
+      ref) ;;
+      store) ref_values[i]="=${values[i]}" ;;
+      *) continue ;;
+    esac
     if [ "${ref_values[i]}" = "?" ]; then
       keychain_entry_exists "${labels[i]}" && continue
     elif got=$(read_secret "${labels[i]}" && printf x) && [ "=$got" = "${ref_values[i]}x" ]; then
       continue
     fi
-    info "Warning: ${labels[i]} changed in Keychain during import, leaving ${names[i]} in ${files[i]} as is"
+    info "Warning: ${labels[i]} no longer holds the value from ${files[i]}, leaving ${names[i]} there as is"
     actions[i]=skip
     failed=true
   done

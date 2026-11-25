@@ -36,7 +36,7 @@ cleanup() {
     security delete-generic-password -s "TEST_PATTERN_TWO" >/dev/null 2>&1 || true
     security delete-generic-password -s "OTHER_PATTERN" >/dev/null 2>&1 || true
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG; do
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -654,6 +654,18 @@ printf '%s_REF_KEY=sk-ref-1\n' "$TEST_KEY" > "$IMP/ref.env"
   | "$SCRIPT_PATH" import -e ref.env >/dev/null 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "${TEST_KEY}_REF_KEY=sk-ref-1" "$(cat "$IMP/ref.env")" "Import keeps the plain value when the Keychain value changed"
 assert_exit_code 1 "$exit_code" "Import exits 1 when a kept Keychain value changed"
+
+# Two picked values overwriting one label: only the file whose value won gets the reference
+DUP="$TEST_DIR/dup"
+mkdir -p "$DUP"
+printf '%s_DUP_KEY=sk-dup-a\n' "$TEST_KEY" > "$DUP/.env"
+printf '%s_DUP_KEY=sk-dup-b\n' "$TEST_KEY" > "$DUP/.env.local"
+(cd "$DUP" && printf '\no\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+kept=$("$SCRIPT_PATH" show "${TEST_KEY}_DUP_KEY" 2>&1)
+plain=$(cat "$DUP/.env" "$DUP/.env.local" | grep -c '=sk-dup-' || true)
+assert_equals "1" "$plain" "Import keeps the overwritten value in its file"
+assert_not_contains "$(cat "$DUP/.env" "$DUP/.env.local")" "=$kept" "Import leaves no plain copy of the stored value"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a picked value was overwritten"
 
 # A file kcm can't rewrite makes import fail
 RO="$TEST_DIR/readonly"
