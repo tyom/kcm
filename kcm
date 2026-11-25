@@ -78,14 +78,12 @@ COMMANDS:
       kcm copy API_KEY
 
   ls [pattern]
-    List accessible secrets in Keychain matching pattern (supports wildcards)
-
-    Note: Only shows secrets that kcm can access. Some application-specific
-    secrets may exist in your keychain but have special access controls
-    that prevent kcm from reading them.
+    List kcm's secrets in Keychain matching pattern (supports wildcards).
+    Other apps' entries are hidden. Untagged entries that look like ones an
+    older kcm added (your account, a valid key name) are listed separately.
 
     Examples:
-      kcm ls               # List all accessible secrets
+      kcm ls               # List all kcm secrets
       kcm ls 'DATABASE*'   # List secrets starting with DATABASE
       kcm ls '*_KEY'       # List secrets ending with _KEY
 
@@ -829,7 +827,7 @@ import_secrets() {
   local -a ref_names=() ref_files=() ref_whys=() ref_marks=() ref_tints=()
   local file idx value why state tick tint is_tracked label existing n=0 m=0 in_keychain
   # One attribute dump instead of a lookup per variable
-  in_keychain=$'\n'"$(keychain_services '.*' | LC_ALL=C sort -u)"$'\n'
+  in_keychain=$'\n'"$(keychain_services '.*' | cut -d' ' -f2- | LC_ALL=C sort -u)"$'\n'
   for file in "${_KCM_ENV_FILES[@]}"; do
     is_tracked=false
     git -C "$(dirname "$file")" ls-files --error-unmatch -- "$(basename "$file")" >/dev/null 2>&1 && is_tracked=true
@@ -1125,7 +1123,9 @@ copy_secret() {
   fi
 }
 
-# Print the generic-password service names in the keychain search list matching REGEX.
+# Print "<origin> <service>" for each generic password in the keychain search list whose
+# service matches REGEX. origin is kcm (creator "kcm "), legacy (untagged, as older kcm
+# versions wrote them: no creator or kind, account $USER, a valid key name) or other.
 # Reads attributes only, so it never asks for Keychain access.
 keychain_services() {
   local regex="$1" keychains keychain
@@ -1133,37 +1133,34 @@ keychain_services() {
   while IFS= read -r keychain; do
     [ -n "$keychain" ] || continue
     keychain=$(echo "$keychain" | xargs)
-    security dump-keychain "$keychain" 2>/dev/null | awk -v regex="$regex" '
-      BEGIN { genp=0; service="" }
-      /^keychain:/ { genp=0; service=""; next }
-      /class: "genp"/ { genp=1; next }
-      /class:/ { genp=0; service=""; next }
-      /0x00000007.*<blob>="[^"]+"/ {
-        if (genp) {
-          service=$0
-          sub(/.*<blob>="/, "", service)
-          sub(/".*/, "", service)
-        }
-        next
+    security dump-keychain "$keychain" 2>/dev/null | awk -v regex="$regex" -v user="$USER" '
+      # Attribute value: "text" without the quotes, or <NULL> as is
+      function val(line) {
+        sub(/^[^=]*=/, "", line)
+        if (line ~ /^".*"$/) line = substr(line, 2, length(line) - 2)
+        return line
       }
-      /"acct"<blob>=/ {
-        if (genp && service) {
-          if (service ~ regex) {
-            print service
-          }
-          service=""
+      function flush(  origin) {
+        if (genp && svc != "" && svc ~ regex) {
+          if (crtr == "kcm ") origin = "kcm"
+          else if (crtr == "<NULL>" && desc == "<NULL>" && acct == user && svc ~ /^[A-Za-z][A-Za-z0-9_]*$/) origin = "legacy"
+          else origin = "other"
+          print origin " " svc
         }
-        next
+        genp = 0; svc = ""; crtr = ""; desc = ""; acct = ""
       }
+      /^keychain:/ { flush(); next }
+      /^class:/ { genp = ($0 ~ /"genp"/); next }
+      /^ *"svce"<blob>=/ { svc = val($0); next }
+      /^ *"crtr"<uint32>=/ { crtr = val($0); next }
+      /^ *"desc"<blob>=/ { desc = val($0); next }
+      /^ *"acct"<blob>=/ { acct = val($0); next }
+      END { flush() }
     ' || true
   done <<< "$keychains"
 }
 
 # Function to list secrets matching pattern
-# NOTE: This function lists only secrets that kcm can actually access.
-# Some keychain entries may be visible in the system keychain dump but have
-# access restrictions that prevent them from being read by the security command.
-# We test each entry for accessibility before showing it to the user.
 list_secrets() {
   if ! command -v security >/dev/null 2>&1; then
     error_exit "This command requires macOS with the 'security' command"
@@ -1180,35 +1177,39 @@ list_secrets() {
     grep_pattern="^${grep_pattern}$"
   fi
 
-  echo -e "${_KCM_BLUE}Accessible secrets in Keychain matching '$pattern':${_KCM_NC}"
+  echo -e "${_KCM_BLUE}kcm secrets in Keychain matching '$pattern':${_KCM_NC}"
   echo ""
 
-  local -a candidates=()
-  local service
-  while IFS= read -r service; do
-    [ -n "$service" ] && candidates+=("$service")
-  done < <(keychain_services "$grep_pattern")
+  # Other apps' entries are left out
+  local -a ours=() legacy=()
+  local origin service
+  while read -r origin service; do
+    case "$origin" in
+      kcm) ours+=("$service") ;;
+      legacy) legacy+=("$service") ;;
+    esac
+  # One line per service; on a name clash kcm sorts before legacy and other, so it wins
+  done < <(keychain_services "$grep_pattern" | LC_ALL=C sort -k2,2 -k1,1 | awk '!seen[$2]++')
 
-  local -a accessible=()
-  if [ ${#candidates[@]} -gt 0 ]; then
-    while IFS= read -r secret; do
-      [ -n "$secret" ] || continue
-      if keychain_entry_exists "$secret"; then
-        accessible+=("$secret")
-      fi
-    done < <(printf '%s\n' "${candidates[@]}" | LC_ALL=C sort -u)
-  fi
-
-  if [ ${#accessible[@]} -eq 0 ]; then
+  if [ ${#ours[@]} -eq 0 ] && [ ${#legacy[@]} -eq 0 ]; then
     echo "  No secrets found matching pattern '$pattern'"
-  else
-    local secret
-    for secret in "${accessible[@]}"; do
-      echo "  • $secret"
+    return 0
+  fi
+  for service in ${ours[@]+"${ours[@]}"}; do
+    echo "  • $service"
+  done
+  if [ ${#legacy[@]} -gt 0 ]; then
+    [ ${#ours[@]} -gt 0 ] && echo ""
+    echo -e "${_KCM_GREY}Probably added by an older kcm (not tagged as kcm's):${_KCM_NC}"
+    for service in "${legacy[@]}"; do
+      echo "  • $service"
     done
-    echo ""
-    info "Use '$_KCM_SCRIPT_NAME show KEY_NAME' to view a secret"
-    info "Use '$_KCM_SCRIPT_NAME copy KEY_NAME' to copy to clipboard"
+  fi
+  echo ""
+  info "Use '$_KCM_SCRIPT_NAME show KEY_NAME' to view a secret"
+  info "Use '$_KCM_SCRIPT_NAME copy KEY_NAME' to copy to clipboard"
+  if [ ${#legacy[@]} -gt 0 ]; then
+    info "To tag an older entry as kcm's: $_KCM_SCRIPT_NAME show KEY_NAME | $_KCM_SCRIPT_NAME add KEY_NAME -"
   fi
 }
 

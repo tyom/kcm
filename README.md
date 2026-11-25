@@ -189,15 +189,15 @@ kcm show DATABASE_URL
 # Copy to clipboard (cleared after 45 seconds, unless you copied something else since)
 kcm copy API_KEY
 
-# List all accessible secrets
+# List kcm's secrets
 kcm ls
 
 # List secrets matching a pattern
 kcm ls "DATABASE*"
 kcm ls "*_KEY"
 
-# Note: Only shows secrets that kcm can access
-# Some app-specific secrets may have access restrictions
+# Other apps' entries are hidden. Untagged entries that look like
+# an older kcm added them are listed in a separate group
 
 # Remove a secret
 kcm remove OLD_API_KEY

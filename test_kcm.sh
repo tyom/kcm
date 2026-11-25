@@ -35,7 +35,7 @@ cleanup() {
     security delete-generic-password -s "TEST_PATTERN_ONE" >/dev/null 2>&1 || true
     security delete-generic-password -s "TEST_PATTERN_TWO" >/dev/null 2>&1 || true
     security delete-generic-password -s "OTHER_PATTERN" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED INJECTED; do
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -157,6 +157,17 @@ assert_equals "test123" "$output" "Show returns correct secret value"
 output=$("$SCRIPT_PATH" ls 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "List command exits successfully"
 assert_contains "$output" "$TEST_KEY" "List shows test key"
+
+# ls shows kcm's entries, then untagged ones from older kcm versions, and hides other apps' entries
+security add-generic-password -s "${TEST_KEY}_LEGACY" -a "$USER" -w old >/dev/null 2>&1
+security add-generic-password -s "${TEST_KEY}_OTHER_APP" -a "some-app" -w x >/dev/null 2>&1
+output=$("$SCRIPT_PATH" ls "${TEST_KEY}*" 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+kcm_part="${output%%older kcm*}"
+legacy_part="${output#*older kcm}"
+assert_contains "$kcm_part" "• $TEST_KEY"$'\n' "List shows kcm entries first"
+assert_not_contains "$kcm_part" "${TEST_KEY}_LEGACY" "List keeps untagged entries out of the kcm group"
+assert_contains "$legacy_part" "• ${TEST_KEY}_LEGACY" "List shows untagged entries from older kcm separately"
+assert_not_contains "$output" "${TEST_KEY}_OTHER_APP" "List hides other apps' entries"
 
 # Test 6: Remove secret
 "$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
