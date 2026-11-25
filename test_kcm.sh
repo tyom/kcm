@@ -329,7 +329,8 @@ assert_equals "$(printf 'ROOT_ONLY ../../.env\nSHARED ./.env.local\nWEB_ONLY ./.
 assert_not_contains "$output" "root" "Listing hides values"
 
 # Test: --show-values masks values; --full shows them when piped
-printf 'LONG_SECRET=sk-abcdefgh12349f2c\nSHORT=short\n' > "$TEST_DIR/mask.env"
+# 24 chars shows first/last 4; 23 chars is fully masked
+printf 'LONG_SECRET=sk-abcdefghijklmnopq9f2c\nSHORT=abcdefghijklmnopqrstuvw\n' > "$TEST_DIR/mask.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>/dev/null)
 assert_equals "$(printf 'LONG_SECRET=sk-a…9f2c\nSHORT=****')" "$output" "Show values masks values"
 output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use --full 2>/dev/null | cat)
@@ -342,6 +343,10 @@ assert_equals "$(printf 'ROOT_ONLY %s\nSHARED %s' "$MONO/.env" "$MONO/.env")" "$
 # Test 26: Lists loaded files on stderr, closest first
 output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- true 2>&1 >/dev/null)
 assert_contains "$output" "Loaded ./.env.local, ../../.env" "Shows loaded env files"
+
+# Test: NODE_ENV=local does not load .env.local twice
+output=$(cd "$MONO/apps/web" && NODE_ENV=local "$SCRIPT_PATH" use -- true 2>&1 >/dev/null)
+assert_contains "$output" "Loaded ./.env.local, ../../.env" "NODE_ENV=local lists .env.local once"
 
 # Test 27: NODE_ENV picks the mode file
 echo "MODE=dev" > "$MONO/.env.development"

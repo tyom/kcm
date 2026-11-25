@@ -397,6 +397,8 @@ process_env_file() {
 discover_env_files() {
   local mode="${NODE_ENV:-development}"
   local names=(".env.$mode.local" ".env.local" ".env.$mode" ".env")
+  # Mode "local" would list .env.local twice
+  [ "$mode" = local ] && names=(".env.local.local" ".env.local" ".env")
   local found=()  # closest and highest priority first
   local dir="$PWD" rel="./" name root="$PWD"
 
@@ -474,8 +476,8 @@ print_merged_env() {
       fi
       value="${MERGED_VALUES[$k]}"
       if [ "$show_values" = masked ]; then
-        # Under 12 chars, first and last 4 would reveal most of the value
-        if [ ${#value} -ge 12 ]; then
+        # From 24 chars, first and last 4 reveal at most a third of the value
+        if [ ${#value} -ge 24 ]; then
           value="${value:0:4}…${value: -4}"
         elif [ -n "$value" ]; then
           value="****"
@@ -761,11 +763,10 @@ show_command_help() {
 # `kcm <command> --help` shows that command's help instead of running it
 case "${2:-}" in
   -h|--help)
-    case "$1" in
-      rm) show_command_help remove; exit 0 ;;
-      list) show_command_help ls; exit 0 ;;
-      add|remove|show|copy|ls|use) show_command_help "$1"; exit 0 ;;
-    esac
+    case "$1" in rm) cmd="remove" ;; list) cmd="ls" ;; *) cmd="$1" ;; esac
+    # Commands with no help section fall through to the dispatcher
+    cmd_help=$(show_command_help "$cmd")
+    if [ -n "$cmd_help" ]; then echo "$cmd_help"; exit 0; fi
     ;;
 esac
 
