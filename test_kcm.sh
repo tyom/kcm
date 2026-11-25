@@ -28,7 +28,8 @@ unset NODE_ENV
 # Cleanup function
 cleanup() {
     # Remove test keys from keychain (silently)
-    security delete-generic-password -s "$TEST_KEY" >/dev/null 2>&1 || true
+    # Loop: a failed account test can leave two entries
+    while security delete-generic-password -s "$TEST_KEY" >/dev/null 2>&1; do :; done
     security delete-generic-password -s "${TEST_KEY}_2" >/dev/null 2>&1 || true
     security delete-generic-password -s "${TEST_KEY}_QUOTE" >/dev/null 2>&1 || true
     security delete-generic-password -s "TEST_PATTERN_ONE" >/dev/null 2>&1 || true
@@ -154,6 +155,16 @@ assert_equals "$secret" "$output" "Multiline secret shown as stored"
 printf 'ML=keychain://%s\n' "$TEST_KEY" > "$TEST_DIR/ml.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/ml.env" -- bash -c 'printf "%s" "$ML"' 2>/dev/null)
 assert_equals "$secret" "$output" "Multiline secret resolved by use"
+
+# Updating an entry saved under another account replaces it instead of adding a second one
+"$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1
+security add-generic-password -s "$TEST_KEY" -a "kcm-test-other" -w old >/dev/null 2>&1
+echo "new" | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 0 "$exit_code" "Update entry with another account"
+assert_equals "new" "$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1)" "Entry with another account updated"
+security find-generic-password -s "$TEST_KEY" -a "$USER" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 44 "$exit_code" "No second entry created"
+"$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1
 
 # Interactive add keeps surrounding spaces
 "$SCRIPT_PATH" add "$TEST_KEY" >/dev/null 2>&1 <<< "  spaced  "
@@ -316,6 +327,16 @@ assert_equals "arg1 arg2" "$output" "Arguments passed correctly"
 printf 'A="x" # note\nB=after\n' > "$TEST_ENV"
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$A|$B"' 2>/dev/null)
 assert_equals "x|after" "$output" "Comment after quoted value ignored"
+
+# A quote inside the trailing comment does not move the closing quote
+printf 'A="x" # "note"\n' > "$TEST_ENV"
+output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$A"' 2>/dev/null)
+assert_equals "x" "$output" "Quote in trailing comment ignored"
+
+# A comment after a multiline value closes it
+printf 'A="one\ntwo" # note\nB=after\n' > "$TEST_ENV"
+output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'printf "%s|%s" "$A" "$B"' 2>/dev/null)
+assert_equals "$(printf 'one\ntwo|after')" "$output" "Comment after multiline value ignored"
 
 # CRLF line endings
 printf 'A="x"\r\nB=after\r\n' > "$TEST_ENV"

@@ -193,25 +193,30 @@ add_secret() {
 # Store a secret, creating or updating it in place.
 # The value goes in as hex on stdin so it never shows in the process list.
 store_secret() {
-  local name="$1" value="$2" hex cmd
+  local name="$1" value="$2" account hex cmd
+  # -U only updates an entry whose account matches, so reuse the existing entry's account
+  account=$(security find-generic-password -s "$name" 2>/dev/null | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p' | head -n 1)
+  account="${account:-$USER}"
   hex=$(printf '%s' "$value" | xxd -p | tr -d '\n')
-  cmd="add-generic-password -U -s \"$name\" -a \"$USER\" -X $hex"
+  local quoted="${account//\\/\\\\}"
+  cmd="add-generic-password -U -s \"$name\" -a \"${quoted//\"/\\\"}\" -X $hex"
   if [ ${#cmd} -lt 4000 ]; then
     printf '%s\n' "$cmd" | security -i >/dev/null 2>&1
   else
     # shortcut: security -i reads at most ~4 KB per line, so values over ~2 KB still go through argv
-    security add-generic-password -U -s "$name" -a "$USER" -X "$hex" >/dev/null 2>&1 || return 1
+    security add-generic-password -U -s "$name" -a "$account" -X "$hex" >/dev/null 2>&1 || return 1
   fi
   # security -i exits 0 even when the command fails, so read the value back
-  [ "$(read_secret "$name")" = "$value" ]
+  [ "$(read_secret "$name" "$account")" = "$value" ]
 }
 
 # Print a secret's value.
 # -w prints hex once a value has a newline or other non-printable byte, so parse -g instead:
 # it prints `password: "value"` or `password: 0x<hex>  "<escaped>"`.
+# An optional second argument limits the lookup to that account.
 read_secret() {
   local out
-  out=$(security find-generic-password -s "$1" -g 2>&1 >/dev/null) || return 1
+  out=$(security find-generic-password -s "$1" ${2:+-a "$2"} -g 2>&1 >/dev/null) || return 1
   out=$(sed -n 's/^password: //p' <<< "$out")
   case "$out" in
     0x*) out="${out%% *}"; xxd -r -p <<< "${out#0x}" ;;
@@ -224,6 +229,20 @@ read_secret() {
 keychain_entry_exists() {
   local key_name="$1"
   security find-generic-password -s "$key_name" >/dev/null 2>&1
+}
+
+# Split TEXT at its closing quote Q: the first Q followed only by spaces or a # comment.
+# On success sets QUOTED_VALUE to the text before it.
+find_closing_quote() {
+  local rest="$1" q="$2"
+  QUOTED_VALUE=""
+  while [[ "$rest" == *"$q"* ]]; do
+    QUOTED_VALUE+="${rest%%"$q"*}"
+    rest="${rest#*"$q"}"
+    [[ "$rest" =~ ^[[:space:]]*(#.*)?$ ]] && return 0
+    QUOTED_VALUE+="$q"
+  done
+  return 1
 }
 
 # Record one assignment, resolving a keychain:// reference
@@ -252,11 +271,10 @@ process_env_file() {
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
 
-    # Inside a multiline value: a line ending with the quote closes it
+    # Inside a multiline value, until a line with the closing quote
     if [ -n "$quote_char" ]; then
-      if [[ "$line" == *"$quote_char" ]]; then
-        line="${line%"$quote_char"}"
-        [ -n "$line" ] && var_value+=$'\n'"$line"
+      if find_closing_quote "$line" "$quote_char"; then
+        [ -n "$QUOTED_VALUE" ] && var_value+=$'\n'"$QUOTED_VALUE"
         quote_char=""
         add_env_value "$var_name" "$var_value"
       else
@@ -278,9 +296,8 @@ process_env_file() {
         quote_char="${var_value:0:1}"
         var_value="${var_value:1}"
         # No closing quote on this line: multiline value
-        [[ "$var_value" == *"$quote_char"* ]] || continue
-        # Keep up to the last quote; anything after it is a comment
-        var_value="${var_value%"$quote_char"*}"
+        find_closing_quote "$var_value" "$quote_char" || continue
+        var_value="$QUOTED_VALUE"
         quote_char=""
         ;;
     esac

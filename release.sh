@@ -80,10 +80,11 @@ fi
 echo "Creating and pushing tag..."
 if [ "$DRY_RUN" = true ]; then
     echo "  Would create tag: v${VERSION}"
-    echo "  Would push: origin main v${VERSION}"
+    echo "  Would push: origin main refs/tags/v${VERSION}"
 else
     git tag -a "v${VERSION}" -m "Release v${VERSION}"
-    git push origin main "v${VERSION}"
+    # Push only this tag, even with push.followTags or a branch of the same name
+    git push --no-follow-tags origin main "refs/tags/v${VERSION}"
 fi
 
 echo ""
