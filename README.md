@@ -66,8 +66,11 @@ DATABASE_URL="keychain://DATABASE_URL"
 Run any command with secrets from your `.env` file automatically resolved:
 
 ```bash
-# Use default .env file
+# Find and merge .env files automatically
 kcm use -- npm run dev
+
+# Load .env.production instead of .env.development
+NODE_ENV=production kcm use -- node server.js
 
 # Specify a custom env file
 kcm use --env-file .env.production -- node server.js
@@ -75,6 +78,38 @@ kcm use --env-file .env.production -- node server.js
 # Access resolved variables in scripts
 kcm use -- bash -c 'echo $DATABASE_URL'
 ```
+
+Without `--env-file`, `kcm use` searches from the current folder up to the git root (the folder with `.git`). In each folder it looks for:
+
+| File | Priority |
+| --- | --- |
+| `.env.<mode>.local` | highest |
+| `.env.local` | |
+| `.env.<mode>` | |
+| `.env` | lowest |
+
+`<mode>` is `$NODE_ENV`, or `development` if unset. kcm merges every file it finds, and a closer folder wins over a parent folder, so in a monorepo `apps/web/.env.local` overrides the root `.env`. Outside a git repo, kcm only checks the current folder. It prints the files it loaded to stderr:
+
+```
+ℹ Loaded ./.env.local, ../../.env
+```
+
+`--env-file` loads exactly one file and skips the search.
+
+### Inspecting what `use` loads
+
+Run `kcm use` without a command to list the variables it would load, with the file each one comes from. Values stay hidden:
+
+```
+$ kcm use
+ℹ Loaded ./.env.local, ../../.env
+API_KEY       ./.env.local
+DATABASE_URL  ../../.env
+```
+
+Add `--show-values` (`-s`) to check the resolved values without exposing them. Values of 24 characters or more show the first and last 4 (`API_KEY=sk-a…9f2c`), and shorter ones show `****`.
+
+`--full` shows complete values. In a terminal they open in `less`, which clears the screen when you quit, so secrets don't stay in your scrollback. When piped (`kcm use --full | grep DB`), it prints plain `NAME=value` lines. To get a single value, use `kcm show NAME` or `kcm copy NAME`.
 
 ### Managing Secrets
 

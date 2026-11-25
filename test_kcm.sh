@@ -22,6 +22,9 @@ TEST_ENV="$TEST_DIR/.env"
 TEST_KEY="TEST_KCM_KEY_$$"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/kcm"
 
+# Discovery tests expect the default mode unless they set NODE_ENV themselves
+unset NODE_ENV
+
 # Cleanup function
 cleanup() {
     # Remove test keys from keychain (silently)
@@ -303,6 +306,78 @@ assert_equals "valid_value" "$output" "Valid var processed despite malformed ent
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo $1 $2' -- "arg1" "arg2" 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "arg1 arg2" "$output" "Arguments passed correctly"
 
+echo
+echo "Test Group: Env File Discovery"
+echo "------------------------------"
+
+# Monorepo layout: outside/.env must never load (above the .git root)
+MONO="$TEST_DIR/outside/repo"
+mkdir -p "$MONO/.git" "$MONO/apps/web"
+echo "ABOVE_ROOT=leaked" > "$TEST_DIR/outside/.env"
+printf 'SHARED=root\nROOT_ONLY=root\n' > "$MONO/.env"
+printf 'SHARED=web\nWEB_ONLY=web\n' > "$MONO/apps/web/.env.local"
+
+# Test 24: Merge files up to the git root, closest wins
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- bash -c 'echo "$SHARED $ROOT_ONLY $WEB_ONLY"' 2>/dev/null)
+assert_equals "web root web" "$output" "Merges env files up to git root, closest wins"
+
+# Test 25: Never read above the git root
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- bash -c 'echo "[$ABOVE_ROOT]"' 2>/dev/null)
+assert_equals "[]" "$output" "Stops at git root"
+
+# Test: Folder reached through a symlink loads files from its real parents
+ln -s apps/web "$MONO/web-link"
+output=$(cd "$MONO/web-link" && "$SCRIPT_PATH" use -- bash -c 'echo "$ROOT_ONLY"' 2>/dev/null)
+assert_equals "root" "$output" "Symlinked folder loads real parent env files"
+rm "$MONO/web-link"
+
+# Test: No command lists names and their source, never values
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use 2>/dev/null) && exit_code=$? || exit_code=$?
+assert_exit_code 0 "$exit_code" "No command lists variables"
+assert_equals "$(printf 'ROOT_ONLY ../../.env\nSHARED ./.env.local\nWEB_ONLY ./.env.local')" "$(echo "$output" | tr -s ' ')" "Lists names with winning file"
+assert_not_contains "$output" "root" "Listing hides values"
+
+# Test: --show-values masks values; --full shows them when piped
+# 24 chars shows first/last 4; 23 chars is fully masked
+printf 'LONG_SECRET=sk-abcdefghijklmnopq9f2c\nSHORT=abcdefghijklmnopqrstuvw\n' > "$TEST_DIR/mask.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>/dev/null)
+assert_equals "$(printf 'LONG_SECRET=sk-a…9f2c\nSHORT=****')" "$output" "Show values masks values"
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use --full 2>/dev/null | cat)
+assert_equals "$(printf 'ROOT_ONLY=root\nSHARED=web\nWEB_ONLY=web')" "$output" "--full prints merged values"
+
+# Test: --env-file with no command lists that file only
+output=$("$SCRIPT_PATH" use -e "$MONO/.env" 2>/dev/null | tr -s ' ')
+assert_equals "$(printf 'ROOT_ONLY %s\nSHARED %s' "$MONO/.env" "$MONO/.env")" "$output" "Lists names from explicit env file"
+
+# Test 26: Lists loaded files on stderr, closest first
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- true 2>&1 >/dev/null)
+assert_contains "$output" "Loaded ./.env.local, ../../.env" "Shows loaded env files"
+
+# Test: NODE_ENV=local does not load .env.local twice
+output=$(cd "$MONO/apps/web" && NODE_ENV=local "$SCRIPT_PATH" use -- true 2>&1 >/dev/null)
+assert_contains "$output" "Loaded ./.env.local, ../../.env" "NODE_ENV=local lists .env.local once"
+
+# Test 27: NODE_ENV picks the mode file
+echo "MODE=dev" > "$MONO/.env.development"
+echo "MODE=prod" > "$MONO/.env.production"
+output=$(cd "$MONO" && "$SCRIPT_PATH" use -- bash -c 'echo "$MODE"' 2>/dev/null)
+assert_equals "dev" "$output" "Defaults to development mode"
+output=$(cd "$MONO" && NODE_ENV=production "$SCRIPT_PATH" use -- bash -c 'echo "$MODE"' 2>/dev/null)
+assert_equals "prod" "$output" "NODE_ENV=production loads .env.production"
+
+echo
+echo "Test Group: Command Help"
+echo "------------------------"
+
+# Test: --help after a command shows only that command's help
+output=$("$SCRIPT_PATH" use --help 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 0 "$exit_code" "use --help exits 0"
+assert_contains "$output" "--env-file FILE" "use --help shows use options"
+assert_not_contains "$output" "add KEY_NAME" "use --help hides other commands"
+
+output=$("$SCRIPT_PATH" rm -h 2>&1)
+assert_contains "$output" "Remove a secret from Keychain" "Alias rm -h shows remove help"
+assert_not_contains "$output" "show KEY_NAME" "rm -h hides other commands"
 echo
 echo "Test Group: Pattern Matching"
 echo "----------------------------"

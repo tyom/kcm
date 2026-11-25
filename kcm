@@ -113,15 +113,29 @@ COMMANDS:
       kcm ls 'DATABASE*'   # List secrets starting with DATABASE
       kcm ls '*_KEY'       # List secrets ending with _KEY
 
-  use [options] -- command [args...]
-    Run a command with secrets from .env file resolved
+  use [options] [-- command [args...]]
+    Run a command with secrets from .env files resolved.
+    Without a command, list the variables that would be loaded and their source file.
+
+    Without --env-file, kcm loads .env, .env.local, .env.<mode> and .env.<mode>.local
+    from the current folder up to the git root and merges them. The closest folder wins,
+    and within a folder the order is .env < .env.<mode> < .env.local < .env.<mode>.local.
+    <mode> is \$NODE_ENV (default: development).
 
     Options:
-      -e, --env-file FILE   - Specify the .env file to use (default: .env)
+      -e, --env-file FILE   - Use only this env file (skips discovery)
+      -s, --show-values     - Without a command, show masked values (first and last 4 chars)
+      --full                - Without a command, show full values (opens in less so they stay
+                              out of terminal scrollback; prints plain text when piped)
       -u, --allow-unsafe    - Allow special characters in env values that are normally blocked
                               for security (use with caution, only with trusted sources)
 
     Examples:
+      kcm use              # list variable names and where they come from
+      kcm use -s           # check values, masked
+      kcm use --full       # inspect full values in a pager
+      kcm use -- npm run dev
+      NODE_ENV=production kcm use -- node server.js
       kcm use -e .env -- npm run dev
       kcm use --env-file ../.env -- make run-server
       kcm use -e .env -- echo \$DATABASE_URL
@@ -376,10 +390,111 @@ process_env_file() {
   done < "$env_file"
 }
 
+# Find env files from the current directory up to the git root.
+# Within a folder: .env < .env.<mode> < .env.local < .env.<mode>.local.
+# Across folders: the closest folder wins.
+# Sets ENV_FILES, lowest priority first.
+discover_env_files() {
+  local mode="${NODE_ENV:-development}"
+  local names=(".env.$mode.local" ".env.local")
+  # Mode "local" would list .env.local twice
+  [ "$mode" = local ] || names+=(".env.$mode")
+  names+=(".env")
+  local found=()  # closest and highest priority first
+  # Physical path: relative paths like ../.env resolve from it, not from a symlinked $PWD
+  local dir rel="./" name root
+  dir=$(pwd -P)
+  root="$dir"
+
+  # Git root is the nearest folder with .git (a file in worktrees); without one, only check cwd
+  while [ "$root" != "/" ] && [ ! -e "$root/.git" ]; do
+    root="${root%/*}"; root="${root:-/}"
+  done
+  [ -e "$root/.git" ] || root="$dir"
+
+  while :; do
+    for name in "${names[@]}"; do
+      [ -f "$dir/$name" ] && found+=("$rel$name")
+    done
+    [ "$dir" = "$root" ] && break
+    dir="${dir%/*}"; dir="${dir:-/}"
+    if [ "$rel" = "./" ]; then rel="../"; else rel="../$rel"; fi
+  done
+
+  if [ ${#found[@]} -eq 0 ]; then
+    info "Warning: no .env files found, proceeding without them"
+    return 0
+  fi
+
+  local list
+  printf -v list '%s, ' "${found[@]}"
+  info "Loaded ${list%, }"
+
+  local i
+  for (( i=${#found[@]}-1; i>=0; i-- )); do
+    ENV_FILES+=("${found[$i]}")
+  done
+}
+
+# Parse ENV_FILES in order; a later file overrides an earlier one.
+# Sets MERGED_NAMES, MERGED_VALUES and MERGED_SOURCES.
+merge_env_files() {
+  local allow_unsafe="$1"
+  MERGED_NAMES=()
+  MERGED_VALUES=()
+  MERGED_SOURCES=()
+
+  local file idx j k name
+  for file in ${ENV_FILES[@]+"${ENV_FILES[@]}"}; do
+    process_env_file "$file" "$allow_unsafe"
+    for idx in "${!PROCESSED_ENV_NAMES[@]}"; do
+      name="${PROCESSED_ENV_NAMES[$idx]}"
+      j=${#MERGED_NAMES[@]}
+      for k in "${!MERGED_NAMES[@]}"; do
+        if [ "${MERGED_NAMES[$k]}" = "$name" ]; then j=$k; break; fi
+      done
+      MERGED_NAMES[j]="$name"
+      MERGED_VALUES[j]="${PROCESSED_ENV_VALUES[$idx]}"
+      MERGED_SOURCES[j]="$file"
+    done
+  done
+}
+
+# Print merged variables sorted by name.
+# show_values: false (name and source file), masked or full (NAME=value)
+print_merged_env() {
+  local show_values="$1"
+  local width=0 name k value
+  for name in ${MERGED_NAMES[@]+"${MERGED_NAMES[@]}"}; do
+    [ "${#name}" -gt "$width" ] && width=${#name}
+  done
+
+  # Names are valid identifiers, so "NAME index" lines sort safely
+  for k in "${!MERGED_NAMES[@]}"; do
+    printf '%s %s\n' "${MERGED_NAMES[$k]}" "$k"
+  done | LC_ALL=C sort | while read -r name k; do
+    if [ "$show_values" = false ]; then
+      printf '%-*s  %s\n' "$width" "$name" "${MERGED_SOURCES[$k]}"
+      continue
+    fi
+    value="${MERGED_VALUES[$k]}"
+    if [ "$show_values" = masked ]; then
+      # From 24 chars, first and last 4 reveal at most a third of the value
+      if [ ${#value} -ge 24 ]; then
+        value="${value:0:4}…${value: -4}"
+      elif [ -n "$value" ]; then
+        value="****"
+      fi
+    fi
+    printf '%s=%s\n' "$name" "$value"
+  done
+}
+
 # Function to use secrets from env file
 use_secrets() {
   local env_file=""
   local allow_unsafe=false
+  local show_values=false
   local args=()
 
   # Parse arguments
@@ -395,6 +510,18 @@ use_secrets() {
       -u|--allow-unsafe)
         allow_unsafe=true
         shift
+        ;;
+      -s|--show-values)
+        show_values=masked
+        shift
+        ;;
+      --full)
+        show_values=full
+        shift
+        ;;
+      -h|--help)
+        show_command_help use
+        exit 0
         ;;
       --)
         shift
@@ -413,46 +540,49 @@ use_secrets() {
     shift
   done
 
-  # Default to .env if not specified
+  ENV_FILES=()
   if [ -z "$env_file" ]; then
-    env_file=".env"
-  fi
-
-  # Basic security validation for env-file path
-  # Only block access to known sensitive system directories
-  if [[ "$env_file" =~ ^/etc/passwd ]] || [[ "$env_file" =~ ^/etc/shadow ]] || \
-     [[ "$env_file" =~ ^/proc/ ]] || [[ "$env_file" =~ ^/sys/ ]] || \
-     [[ "$env_file" =~ ^/dev/ ]]; then
-    error_exit "Security error: Cannot use system files as env-file"
-  fi
-
-  # Optional verbose warning for paths outside current directory (can be disabled)
-  if [ "${KCM_VERBOSE:-}" = "1" ]; then
-    if [[ "$env_file" =~ ^\.\. ]] || [[ "$env_file" =~ ^/ ]]; then
-      info "Note: Using env-file outside current directory: $env_file" >&2
-    fi
-  fi
-
-  # Check if there's a command to run
-  if [ ${#args[@]} -eq 0 ]; then
-    error_exit "No command specified. Use: $SCRIPT_NAME use --env-file .env -- command [args...]"
-  fi
-
-  # Process the env file
-  if [ -f "$env_file" ]; then
-    process_env_file "$env_file" "$allow_unsafe"
-
-    if [ ${#PROCESSED_ENV_NAMES[@]} -gt 0 ]; then
-      local idx
-      for idx in "${!PROCESSED_ENV_NAMES[@]}"; do
-        local var_name="${PROCESSED_ENV_NAMES[$idx]}"
-        local var_value="${PROCESSED_ENV_VALUES[$idx]}"
-        export "$var_name=$var_value"
-      done
-    fi
+    discover_env_files
   else
-    info "Warning: env file '$env_file' not found, proceeding without it"
+    # Basic security validation for env-file path
+    # Only block access to known sensitive system directories
+    if [[ "$env_file" =~ ^/etc/passwd ]] || [[ "$env_file" =~ ^/etc/shadow ]] || \
+       [[ "$env_file" =~ ^/proc/ ]] || [[ "$env_file" =~ ^/sys/ ]] || \
+       [[ "$env_file" =~ ^/dev/ ]]; then
+      error_exit "Security error: Cannot use system files as env-file"
+    fi
+
+    # Optional verbose warning for paths outside current directory (can be disabled)
+    if [ "${KCM_VERBOSE:-}" = "1" ]; then
+      if [[ "$env_file" =~ ^\.\. ]] || [[ "$env_file" =~ ^/ ]]; then
+        info "Note: Using env-file outside current directory: $env_file" >&2
+      fi
+    fi
+
+    if [ -f "$env_file" ]; then
+      ENV_FILES=("$env_file")
+    else
+      info "Warning: env file '$env_file' not found, proceeding without it"
+    fi
   fi
+
+  merge_env_files "$allow_unsafe"
+
+  # No command: list what would be loaded
+  if [ ${#args[@]} -eq 0 ]; then
+    if [ "$show_values" = full ] && [ -t 1 ]; then
+      # less keeps secrets off the scrollback: -+F -+X force its separate screen even if $LESS disables it
+      print_merged_env full | less -+F -+X || true
+    else
+      print_merged_env "$show_values"
+    fi
+    return 0
+  fi
+
+  local k
+  for k in "${!MERGED_NAMES[@]}"; do
+    export "${MERGED_NAMES[$k]}=${MERGED_VALUES[$k]}"
+  done
 
   # Execute the command with the processed environment
   exec "${args[@]}"
@@ -627,13 +757,33 @@ list_secrets() {
   fi
 }
 
+# Print one command's section of show_help (headings are the 2-space indented lines)
+show_command_help() {
+  show_help | awk -v cmd="$1" '/^[^ ]/ { p = 0 } /^  [a-z]/ { p = ($1 == cmd) } p'
+}
+
+# Command aliases
+case "${1:-}" in
+  rm) set -- remove "${@:2}" ;;
+  list) set -- ls "${@:2}" ;;
+esac
+
+# `kcm <command> --help` shows that command's help instead of running it
+case "${2:-}" in
+  -h|--help)
+    # Commands with no help section fall through to the dispatcher
+    cmd_help=$(show_command_help "$1")
+    if [ -n "$cmd_help" ]; then echo "$cmd_help"; exit 0; fi
+    ;;
+esac
+
 # Main command dispatcher
 case "${1:-}" in
   add)
     shift
     add_secret "$@"
     ;;
-  remove|rm)
+  remove)
     shift
     remove_secret "$@"
     ;;
@@ -645,7 +795,7 @@ case "${1:-}" in
     shift
     copy_secret "$@"
     ;;
-  ls|list)
+  ls)
     shift
     list_secrets "$@"
     ;;
