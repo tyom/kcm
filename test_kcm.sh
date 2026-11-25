@@ -358,6 +358,10 @@ printf 'FOO=file\n' > "$TEST_ENV"
 output=$(FOO=shell "$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$FOO"' 2>/dev/null)
 assert_equals "shell" "$output" "Environment value wins over env file"
 
+# kcm's own variable names must not replace exported ones
+output=$(VERSION=caller k=caller env_file=caller "$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$VERSION $k $env_file"' 2>/dev/null)
+assert_equals "caller caller caller" "$output" "Exported names kcm uses internally pass through unchanged"
+
 output=$(FOO=shell-value-at-least-24-chars "$SCRIPT_PATH" use --env-file "$TEST_ENV" -s 2>/dev/null)
 assert_equals "FOO=shel…hars" "$output" "Listing shows the environment value"
 output=$(FOO=shell "$SCRIPT_PATH" use --env-file "$TEST_ENV" 2>/dev/null | tr -s ' ')
