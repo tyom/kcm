@@ -6,33 +6,33 @@
 
 set -euo pipefail
 
-VERSION="0.5.0"
-SCRIPT_NAME="$(basename "$0")"
+_KCM_VERSION="0.5.0"
+_KCM_SCRIPT_NAME="$(basename "$0")"
 
 # Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-GREY='\033[90m'
-NC='\033[0m' # No Color
+_KCM_RED='\033[0;31m'
+_KCM_GREEN='\033[0;32m'
+_KCM_YELLOW='\033[1;33m'
+_KCM_BLUE='\033[0;34m'
+_KCM_GREY='\033[90m'
+_KCM_NC='\033[0m' # No Color
 
 # Arrays holding processed env assignments (stay in memory)
-declare -a PROCESSED_ENV_NAMES=()
-declare -a PROCESSED_ENV_VALUES=()
+declare -a _KCM_PROCESSED_ENV_NAMES=()
+declare -a _KCM_PROCESSED_ENV_VALUES=()
 
 # Helper functions
 error_exit() {
-  echo -e "${RED}Error: $1${NC}" >&2
+  echo -e "${_KCM_RED}Error: $1${_KCM_NC}" >&2
   exit 1
 }
 
 success() {
-  echo -e "${GREEN}✓${NC} $1" >&2
+  echo -e "${_KCM_GREEN}✓${_KCM_NC} $1" >&2
 }
 
 info() {
-  echo -e "${YELLOW}ℹ${NC} $1" >&2
+  echo -e "${_KCM_YELLOW}ℹ${_KCM_NC} $1" >&2
 }
 
 show_help() {
@@ -40,7 +40,7 @@ show_help() {
 kcm - Keychain Master
 
 USAGE:
-  $SCRIPT_NAME <command> [options]
+  $_KCM_SCRIPT_NAME <command> [options]
 
 COMMANDS:
   add KEY_NAME
@@ -93,6 +93,7 @@ COMMANDS:
     from the current folder up to the git root and merges them. The closest folder wins,
     and within a folder the order is .env < .env.<mode> < .env.local < .env.<mode>.local.
     <mode> is \$NODE_ENV (default: development).
+    Variables already set in the environment win over env files.
 
     Options:
       -e, --env-file FILE   - Use only this env file (skips discovery)
@@ -109,6 +110,16 @@ COMMANDS:
       kcm use -e .env -- npm run dev
       kcm use --env-file ../.env -- make run-server
       kcm use -e .env -- echo \$DATABASE_URL
+
+  install-wrapper [PATH]
+    Add a script to the current git repo that runs a command through 'kcm use'
+    when kcm is installed, and runs it directly otherwise. Use it in committed
+    scripts so teammates without kcm can run them with plain .env values.
+    Without PATH, asks for the location (default: scripts/with-env).
+
+    Examples:
+      kcm install-wrapper
+      kcm install-wrapper bin/with-env
 
   help
     Show this help message
@@ -129,13 +140,13 @@ add_secret() {
   fi
 
   if [ $# -lt 1 ]; then
-    echo -e "${RED}Error: KEY_NAME is required${NC}" >&2
+    echo -e "${_KCM_RED}Error: KEY_NAME is required${_KCM_NC}" >&2
     echo "" >&2
-    echo "Usage: $SCRIPT_NAME add KEY_NAME" >&2
+    echo "Usage: $_KCM_SCRIPT_NAME add KEY_NAME" >&2
     echo "" >&2
     echo "Examples:" >&2
-    echo "  $SCRIPT_NAME add API_KEY                    # Interactive" >&2
-    echo "  echo \"secret\" | $SCRIPT_NAME add TOKEN -   # From stdin" >&2
+    echo "  $_KCM_SCRIPT_NAME add API_KEY                    # Interactive" >&2
+    echo "  echo \"secret\" | $_KCM_SCRIPT_NAME add TOKEN -   # From stdin" >&2
     exit 1
   fi
 
@@ -151,7 +162,7 @@ add_secret() {
   if [ $# -eq 1 ]; then
     # Interactive mode - prompt for value
     info "Enter secret value for $KEY_NAME (input will be hidden):"
-    echo -e "${GREY}For long secrets (>1000 chars), use: ${GREEN}pbpaste | $SCRIPT_NAME add $KEY_NAME -${NC}" >&2
+    echo -e "${_KCM_GREY}For long secrets (>1000 chars), use: ${_KCM_GREEN}pbpaste | $_KCM_SCRIPT_NAME add $KEY_NAME -${_KCM_NC}" >&2
     IFS= read -rs SECRET_VALUE
     echo "" >&2  # New line after hidden input
 
@@ -184,7 +195,7 @@ add_secret() {
     # Also provide info about verification
     echo "" >&2
     info "To verify: security find-generic-password -s \"$KEY_NAME\" -w" >&2
-    info "To use: $SCRIPT_NAME use --env-file .env -- <command>" >&2
+    info "To use: $_KCM_SCRIPT_NAME use --env-file .env -- <command>" >&2
   else
     error_exit "Failed to add secret to Keychain"
   fi
@@ -232,39 +243,45 @@ keychain_entry_exists() {
 }
 
 # Split TEXT at its closing quote Q: the first Q followed only by spaces or a # comment.
-# On success sets QUOTED_VALUE to the text before it.
+# On success sets _KCM_QUOTED_VALUE to the text before it.
 find_closing_quote() {
   local rest="$1" q="$2"
-  QUOTED_VALUE=""
+  _KCM_QUOTED_VALUE=""
   while [[ "$rest" == *"$q"* ]]; do
-    QUOTED_VALUE+="${rest%%"$q"*}"
+    _KCM_QUOTED_VALUE+="${rest%%"$q"*}"
     rest="${rest#*"$q"}"
     [[ "$rest" =~ ^[[:space:]]*(#.*)?$ ]] && return 0
-    QUOTED_VALUE+="$q"
+    _KCM_QUOTED_VALUE+="$q"
   done
   return 1
+}
+
+# True if NAME was exported to kcm by the caller (set _KCM_EXPORTED_NAMES first)
+is_exported() {
+  [[ "$_KCM_EXPORTED_NAMES" == *$'\n'"$1"$'\n'* ]]
 }
 
 # Record one assignment, resolving a keychain:// reference
 add_env_value() {
   local name="$1" value="$2" resolved
-  if [[ "$value" == keychain://* ]]; then
+  # The environment wins, so skip the lookup and its Keychain prompt
+  if [[ "$value" == keychain://* ]] && ! is_exported "$name"; then
     if resolved=$(read_secret "${value#keychain://}") && [ -n "$resolved" ]; then
       value="$resolved"
     else
       info "Warning: $value not found in Keychain, keeping it as is"
     fi
   fi
-  PROCESSED_ENV_NAMES+=("$name")
-  PROCESSED_ENV_VALUES+=("$value")
+  _KCM_PROCESSED_ENV_NAMES+=("$name")
+  _KCM_PROCESSED_ENV_VALUES+=("$value")
 }
 
-# Parse an env file into PROCESSED_ENV_NAMES and PROCESSED_ENV_VALUES.
+# Parse an env file into _KCM_PROCESSED_ENV_NAMES and _KCM_PROCESSED_ENV_VALUES.
 # Values are only ever exported, never passed to source or eval.
 process_env_file() {
   local env_file="$1"
-  PROCESSED_ENV_NAMES=()
-  PROCESSED_ENV_VALUES=()
+  _KCM_PROCESSED_ENV_NAMES=()
+  _KCM_PROCESSED_ENV_VALUES=()
   [ -f "$env_file" ] || return 0
 
   local line var_name="" var_value="" quote_char=""
@@ -274,7 +291,7 @@ process_env_file() {
     # Inside a multiline value, until a line with the closing quote
     if [ -n "$quote_char" ]; then
       if find_closing_quote "$line" "$quote_char"; then
-        [ -n "$QUOTED_VALUE" ] && var_value+=$'\n'"$QUOTED_VALUE"
+        [ -n "$_KCM_QUOTED_VALUE" ] && var_value+=$'\n'"$_KCM_QUOTED_VALUE"
         quote_char=""
         add_env_value "$var_name" "$var_value"
       else
@@ -297,7 +314,7 @@ process_env_file() {
         var_value="${var_value:1}"
         # No closing quote on this line: multiline value
         find_closing_quote "$var_value" "$quote_char" || continue
-        var_value="$QUOTED_VALUE"
+        var_value="$_KCM_QUOTED_VALUE"
         quote_char=""
         ;;
     esac
@@ -305,10 +322,21 @@ process_env_file() {
   done < "$env_file"
 }
 
+# Print the git root: the nearest folder with .git (a file in worktrees), from the physical cwd
+find_git_root() {
+  local root
+  root=$(pwd -P)
+  while [ "$root" != "/" ] && [ ! -e "$root/.git" ]; do
+    root="${root%/*}"; root="${root:-/}"
+  done
+  [ -e "$root/.git" ] || return 1
+  printf '%s\n' "$root"
+}
+
 # Find env files from the current directory up to the git root.
 # Within a folder: .env < .env.<mode> < .env.local < .env.<mode>.local.
 # Across folders: the closest folder wins.
-# Sets ENV_FILES, lowest priority first.
+# Sets _KCM_ENV_FILES, lowest priority first.
 discover_env_files() {
   local mode="${NODE_ENV:-development}"
   local names=(".env.$mode.local" ".env.local")
@@ -319,13 +347,8 @@ discover_env_files() {
   # Physical path: relative paths like ../.env resolve from it, not from a symlinked $PWD
   local dir rel="./" name root
   dir=$(pwd -P)
-  root="$dir"
-
-  # Git root is the nearest folder with .git (a file in worktrees); without one, only check cwd
-  while [ "$root" != "/" ] && [ ! -e "$root/.git" ]; do
-    root="${root%/*}"; root="${root:-/}"
-  done
-  [ -e "$root/.git" ] || root="$dir"
+  # Without a git root, only check cwd
+  root=$(find_git_root) || root="$dir"
 
   while :; do
     for name in "${names[@]}"; do
@@ -347,29 +370,30 @@ discover_env_files() {
 
   local i
   for (( i=${#found[@]}-1; i>=0; i-- )); do
-    ENV_FILES+=("${found[$i]}")
+    _KCM_ENV_FILES+=("${found[$i]}")
   done
 }
 
-# Parse ENV_FILES in order; a later file overrides an earlier one.
-# Sets MERGED_NAMES, MERGED_VALUES and MERGED_SOURCES.
+# Parse _KCM_ENV_FILES in order; a later file overrides an earlier one.
+# Sets _KCM_MERGED_NAMES, _KCM_MERGED_VALUES and _KCM_MERGED_SOURCES.
 merge_env_files() {
-  MERGED_NAMES=()
-  MERGED_VALUES=()
-  MERGED_SOURCES=()
+  _KCM_MERGED_NAMES=()
+  _KCM_MERGED_VALUES=()
+  _KCM_MERGED_SOURCES=()
 
   local file idx j k name
-  for file in ${ENV_FILES[@]+"${ENV_FILES[@]}"}; do
+  for file in ${_KCM_ENV_FILES[@]+"${_KCM_ENV_FILES[@]}"}; do
     process_env_file "$file"
-    for idx in "${!PROCESSED_ENV_NAMES[@]}"; do
-      name="${PROCESSED_ENV_NAMES[$idx]}"
-      j=${#MERGED_NAMES[@]}
-      for k in "${!MERGED_NAMES[@]}"; do
-        if [ "${MERGED_NAMES[$k]}" = "$name" ]; then j=$k; break; fi
+    for idx in "${!_KCM_PROCESSED_ENV_NAMES[@]}"; do
+      name="${_KCM_PROCESSED_ENV_NAMES[$idx]}"
+      j=${#_KCM_MERGED_NAMES[@]}
+      for k in "${!_KCM_MERGED_NAMES[@]}"; do
+        if [ "${_KCM_MERGED_NAMES[$k]}" = "$name" ]; then j=$k; break; fi
       done
-      MERGED_NAMES[j]="$name"
-      MERGED_VALUES[j]="${PROCESSED_ENV_VALUES[$idx]}"
-      MERGED_SOURCES[j]="$file"
+      _KCM_MERGED_NAMES[j]="$name"
+      _KCM_MERGED_VALUES[j]="${_KCM_PROCESSED_ENV_VALUES[$idx]}"
+      _KCM_MERGED_SOURCES[j]="$file"
+      if is_exported "$name"; then _KCM_MERGED_SOURCES[j]="environment"; fi
     done
   done
 }
@@ -377,38 +401,40 @@ merge_env_files() {
 # Print merged variables sorted by name.
 # show_values: false (name and source file), masked or full (NAME=value)
 print_merged_env() {
-  local show_values="$1"
-  local width=0 name k value
-  for name in ${MERGED_NAMES[@]+"${MERGED_NAMES[@]}"}; do
-    [ "${#name}" -gt "$width" ] && width=${#name}
+  local _kcm_show_values="$1"
+  local _kcm_width=0 _kcm_name _kcm_k _kcm_value
+  for _kcm_name in ${_KCM_MERGED_NAMES[@]+"${_KCM_MERGED_NAMES[@]}"}; do
+    [ "${#_kcm_name}" -gt "$_kcm_width" ] && _kcm_width=${#_kcm_name}
   done
 
   # Names are valid identifiers, so "NAME index" lines sort safely
-  for k in "${!MERGED_NAMES[@]}"; do
-    printf '%s %s\n' "${MERGED_NAMES[$k]}" "$k"
-  done | LC_ALL=C sort | while read -r name k; do
-    if [ "$show_values" = false ]; then
-      printf '%-*s  %s\n' "$width" "$name" "${MERGED_SOURCES[$k]}"
+  for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
+    printf '%s %s\n' "${_KCM_MERGED_NAMES[$_kcm_k]}" "$_kcm_k"
+  done | LC_ALL=C sort | while read -r _kcm_name _kcm_k; do
+    if [ "$_kcm_show_values" = false ]; then
+      printf '%-*s  %s\n' "$_kcm_width" "$_kcm_name" "${_KCM_MERGED_SOURCES[$_kcm_k]}"
       continue
     fi
-    value="${MERGED_VALUES[$k]}"
-    if [ "$show_values" = masked ]; then
+    _kcm_value="${_KCM_MERGED_VALUES[$_kcm_k]}"
+    # printenv adds one newline; the x keeps any newlines of the value itself
+    if is_exported "$_kcm_name"; then _kcm_value=$(printenv "$_kcm_name"; echo x); _kcm_value="${_kcm_value%$'\nx'}"; fi
+    if [ "$_kcm_show_values" = masked ]; then
       # From 24 chars, first and last 4 reveal at most a third of the value
-      if [ ${#value} -ge 24 ]; then
-        value="${value:0:4}…${value: -4}"
-      elif [ -n "$value" ]; then
-        value="****"
+      if [ ${#_kcm_value} -ge 24 ]; then
+        _kcm_value="${_kcm_value:0:4}…${_kcm_value: -4}"
+      elif [ -n "$_kcm_value" ]; then
+        _kcm_value="****"
       fi
     fi
-    printf '%s=%s\n' "$name" "$value"
+    printf '%s=%s\n' "$_kcm_name" "$_kcm_value"
   done
 }
 
 # Function to use secrets from env file
 use_secrets() {
-  local env_file=""
-  local show_values=false
-  local args=()
+  local _kcm_env_file=""
+  local _kcm_show_values=false
+  local _kcm_args=()
 
   # Parse arguments
   while [ $# -gt 0 ]; do
@@ -417,7 +443,7 @@ use_secrets() {
         if [ -z "${2:-}" ]; then
           error_exit "-e/--env-file requires an argument"
         fi
-        env_file="$2"
+        _kcm_env_file="$2"
         shift 2
         ;;
       -u|--allow-unsafe)
@@ -425,11 +451,11 @@ use_secrets() {
         shift
         ;;
       -s|--show-values)
-        show_values=masked
+        _kcm_show_values=masked
         shift
         ;;
       --full)
-        show_values=full
+        _kcm_show_values=full
         shift
         ;;
       -h|--help)
@@ -441,7 +467,7 @@ use_secrets() {
         break
         ;;
       *)
-        args+=("$1")
+        _kcm_args+=("$1")
         shift
         ;;
     esac
@@ -449,41 +475,80 @@ use_secrets() {
 
   # Add remaining arguments after --
   while [ $# -gt 0 ]; do
-    args+=("$1")
+    _kcm_args+=("$1")
     shift
   done
 
-  ENV_FILES=()
-  if [ -z "$env_file" ]; then
+  _KCM_ENV_FILES=()
+  if [ -z "$_kcm_env_file" ]; then
     discover_env_files
   else
-    if [ -f "$env_file" ]; then
-      ENV_FILES=("$env_file")
+    if [ -f "$_kcm_env_file" ]; then
+      _KCM_ENV_FILES=("$_kcm_env_file")
     else
-      info "Warning: env file '$env_file' not found, proceeding without it"
+      info "Warning: env file '$_kcm_env_file' not found, proceeding without it"
     fi
   fi
 
+  # Like dotenv, variables already in the environment are not overridden
+  _KCM_EXPORTED_NAMES=$'\n'"$(compgen -e)"$'\n'
   merge_env_files
 
   # No command: list what would be loaded
-  if [ ${#args[@]} -eq 0 ]; then
-    if [ "$show_values" = full ] && [ -t 1 ]; then
+  if [ ${#_kcm_args[@]} -eq 0 ]; then
+    if [ "$_kcm_show_values" = full ] && [ -t 1 ]; then
       # less keeps secrets off the scrollback: -+F -+X force its separate screen even if $LESS disables it
       print_merged_env full | less -+F -+X || true
     else
-      print_merged_env "$show_values"
+      print_merged_env "$_kcm_show_values"
     fi
     return 0
   fi
 
-  local k
-  for k in "${!MERGED_NAMES[@]}"; do
-    export "${MERGED_NAMES[$k]}=${MERGED_VALUES[$k]}"
+  local _kcm_k
+  for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
+    if is_exported "${_KCM_MERGED_NAMES[$_kcm_k]}"; then continue; fi
+    export "${_KCM_MERGED_NAMES[$_kcm_k]}=${_KCM_MERGED_VALUES[$_kcm_k]}"
   done
 
   # Execute the command with the processed environment
-  exec "${args[@]}"
+  exec "${_kcm_args[@]}"
+}
+
+# Write a script that runs a command through kcm use when kcm is installed,
+# so committed scripts work for people without kcm
+install_wrapper() {
+  local default="scripts/with-env" path="${1:-}" root target
+  root=$(find_git_root) || error_exit "Not in a git repository"
+
+  if [ -z "$path" ]; then
+    # read prints the prompt only in a terminal; no answer means the default
+    read -r -p "Location relative to $root [$default]: " path || true
+    path="${path:-$default}"
+  fi
+  case "$path" in /*|..|../*|*/../*|*/..) error_exit "Location must be inside the git root" ;; esac
+  target="$root/$path"
+
+  local script
+  script=$(cat << 'WRAPPER'
+#!/bin/sh
+# Resolve keychain:// secrets with kcm when it is installed, otherwise run the command as is.
+# See https://github.com/tyom/kcm
+command -v kcm >/dev/null 2>&1 && exec kcm use -- "$@"
+exec "$@"
+WRAPPER
+)
+
+  if [ -e "$target" ]; then
+    [ "$(cat "$target")" = "$script" ] || error_exit "$path already exists and is not the kcm wrapper"
+    info "$path is already installed"
+  else
+    mkdir -p "$(dirname "$target")"
+    printf '%s\n' "$script" > "$target"
+    success "Installed $path"
+  fi
+  chmod +x "$target"
+  info "Use it in scripts, e.g. \"dev\": \"$path vite\", and commit it"
 }
 
 # Function to remove secret from keychain
@@ -493,7 +558,7 @@ remove_secret() {
   fi
 
   if [ $# -lt 1 ]; then
-    error_exit "KEY_NAME is required. Usage: $SCRIPT_NAME remove KEY_NAME"
+    error_exit "KEY_NAME is required. Usage: $_KCM_SCRIPT_NAME remove KEY_NAME"
   fi
 
   local KEY_NAME="$1"
@@ -518,7 +583,7 @@ show_secret() {
   fi
 
   if [ $# -lt 1 ]; then
-    error_exit "KEY_NAME is required. Usage: $SCRIPT_NAME show KEY_NAME"
+    error_exit "KEY_NAME is required. Usage: $_KCM_SCRIPT_NAME show KEY_NAME"
   fi
 
   local KEY_NAME="$1"
@@ -543,7 +608,7 @@ copy_secret() {
   fi
 
   if [ $# -lt 1 ]; then
-    error_exit "KEY_NAME is required. Usage: $SCRIPT_NAME copy KEY_NAME"
+    error_exit "KEY_NAME is required. Usage: $_KCM_SCRIPT_NAME copy KEY_NAME"
   fi
 
   local KEY_NAME="$1"
@@ -587,7 +652,7 @@ list_secrets() {
     grep_pattern="^${grep_pattern}$"
   fi
 
-  echo -e "${BLUE}Accessible secrets in Keychain matching '$pattern':${NC}"
+  echo -e "${_KCM_BLUE}Accessible secrets in Keychain matching '$pattern':${_KCM_NC}"
   echo ""
 
   local -a candidates=()
@@ -648,8 +713,8 @@ list_secrets() {
       echo "  • $secret"
     done
     echo ""
-    info "Use '$SCRIPT_NAME show KEY_NAME' to view a secret"
-    info "Use '$SCRIPT_NAME copy KEY_NAME' to copy to clipboard"
+    info "Use '$_KCM_SCRIPT_NAME show KEY_NAME' to view a secret"
+    info "Use '$_KCM_SCRIPT_NAME copy KEY_NAME' to copy to clipboard"
   fi
 }
 
@@ -699,8 +764,12 @@ case "${1:-}" in
     shift
     use_secrets "$@"
     ;;
+  install-wrapper)
+    shift
+    install_wrapper "$@"
+    ;;
   version|--version|-v)
-    echo "kcm version $VERSION"
+    echo "kcm version $_KCM_VERSION"
     ;;
   help|--help|-h)
     show_help
@@ -710,10 +779,10 @@ case "${1:-}" in
     exit 1
     ;;
   *)
-    echo -e "${RED}Error: Unknown command '$1'${NC}" >&2
+    echo -e "${_KCM_RED}Error: Unknown command '$1'${_KCM_NC}" >&2
     echo "" >&2
-    echo "Available commands: add, remove, show, copy, ls, use, version, help" >&2
-    echo "Try '$SCRIPT_NAME help' for more information." >&2
+    echo "Available commands: add, remove, show, copy, ls, use, install-wrapper, version, help" >&2
+    echo "Try '$_KCM_SCRIPT_NAME help' for more information." >&2
     exit 1
     ;;
 esac

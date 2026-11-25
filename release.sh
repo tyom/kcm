@@ -56,7 +56,7 @@ echo "Updating version in kcm script..."
 if [ "$DRY_RUN" = true ]; then
     echo "  Would update VERSION and header comment to ${VERSION}"
 else
-    "${SED_INPLACE[@]}" "s/^VERSION=\".*\"/VERSION=\"${VERSION}\"/" kcm
+    "${SED_INPLACE[@]}" "s/^_KCM_VERSION=\".*\"/_KCM_VERSION=\"${VERSION}\"/" kcm
     "${SED_INPLACE[@]}" "s/^# Version: .*/# Version: ${VERSION}/" kcm
 fi
 

@@ -353,6 +353,28 @@ printf 'GONE=keychain://KCM_TEST_MISSING_%s\n' "$$" > "$TEST_ENV"
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- true 2>&1)
 assert_contains "$output" "KCM_TEST_MISSING_$$ not found" "Warns about missing keychain entry"
 
+# A variable already in the environment wins over env files
+printf 'FOO=file\n' > "$TEST_ENV"
+output=$(FOO=shell "$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$FOO"' 2>/dev/null)
+assert_equals "shell" "$output" "Environment value wins over env file"
+
+# kcm's own variable names must not replace exported ones
+output=$(VERSION=caller k=caller env_file=caller "$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$VERSION $k $env_file"' 2>/dev/null)
+assert_equals "caller caller caller" "$output" "Exported names kcm uses internally pass through unchanged"
+printf 'value=file\nname=file\n' > "$TEST_DIR/names.env"
+output=$(value=caller name=caller "$SCRIPT_PATH" use --env-file "$TEST_DIR/names.env" --full 2>/dev/null | tr '\n' ' ')
+assert_equals "name=caller value=caller " "$output" "Listing shows exported values for names kcm uses internally"
+
+output=$(FOO=shell-value-at-least-24-chars "$SCRIPT_PATH" use --env-file "$TEST_ENV" -s 2>/dev/null)
+assert_equals "FOO=shel…hars" "$output" "Listing shows the environment value"
+output=$(FOO=shell "$SCRIPT_PATH" use --env-file "$TEST_ENV" 2>/dev/null | tr -s ' ')
+assert_equals "FOO environment" "$output" "Listing names the environment as source"
+
+# No Keychain lookup for a variable the environment already sets
+printf 'GONE=keychain://KCM_TEST_MISSING_%s\n' "$$" > "$TEST_ENV"
+output=$(GONE=shell "$SCRIPT_PATH" use --env-file "$TEST_ENV" -- true 2>&1)
+assert_not_contains "$output" "not found" "Skips Keychain lookup for variable set in environment"
+
 # -e without a file name
 output=$("$SCRIPT_PATH" use -e 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 1 "$exit_code" "-e without argument fails"
@@ -430,6 +452,32 @@ assert_not_contains "$output" "add KEY_NAME" "use --help hides other commands"
 output=$("$SCRIPT_PATH" rm -h 2>&1)
 assert_contains "$output" "Remove a secret from Keychain" "Alias rm -h shows remove help"
 assert_not_contains "$output" "show KEY_NAME" "rm -h hides other commands"
+
+echo
+echo "Test Group: Install Wrapper"
+echo "---------------------------"
+WRAP="$TEST_DIR/wrap-repo"
+mkdir -p "$WRAP/.git" "$WRAP/apps/web"
+
+# No answer to the prompt: default location at the git root, even from a subfolder
+(cd "$WRAP/apps/web" && "$SCRIPT_PATH" install-wrapper </dev/null >/dev/null 2>&1)
+output=$(PATH=/usr/bin:/bin "$WRAP/scripts/with-env" echo ran 2>&1)
+assert_equals "ran" "$output" "Installs runnable wrapper at default location"
+
+# The prompt answer sets the location
+(cd "$WRAP" && echo "bin/env" | "$SCRIPT_PATH" install-wrapper >/dev/null 2>&1)
+[ -x "$WRAP/bin/env" ] && pass "Installs at the location given at the prompt" || fail "Installs at the location given at the prompt"
+
+# Never overwrites a different file
+echo "mine" > "$WRAP/bin/other"
+output=$(cd "$WRAP" && "$SCRIPT_PATH" install-wrapper bin/other 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "Refuses to overwrite an existing file"
+assert_equals "mine" "$(cat "$WRAP/bin/other")" "Existing file left unchanged"
+
+# Stays inside the git root
+output=$(cd "$WRAP" && "$SCRIPT_PATH" install-wrapper ../outside/with-env 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "Rejects a location outside the git root"
+[ ! -e "$TEST_DIR/outside/with-env" ] && pass "Writes nothing outside the git root" || fail "Writes nothing outside the git root"
 echo
 echo "Test Group: Pattern Matching"
 echo "----------------------------"
