@@ -466,6 +466,11 @@ echo "mine" > "$WRAP/bin/other"
 output=$(cd "$WRAP" && "$SCRIPT_PATH" install-wrapper bin/other 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 1 "$exit_code" "Refuses to overwrite an existing file"
 assert_equals "mine" "$(cat "$WRAP/bin/other")" "Existing file left unchanged"
+
+# Stays inside the git root
+output=$(cd "$WRAP" && "$SCRIPT_PATH" install-wrapper ../outside/with-env 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "Rejects a location outside the git root"
+[ ! -e "$TEST_DIR/outside/with-env" ] && pass "Writes nothing outside the git root" || fail "Writes nothing outside the git root"
 echo
 echo "Test Group: Pattern Matching"
 echo "----------------------------"

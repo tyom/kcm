@@ -113,6 +113,8 @@ The location is relative to the git root. kcm won't overwrite an existing file. 
 
 ```sh
 #!/bin/sh
+# Resolve keychain:// secrets with kcm when it is installed, otherwise run the command as is.
+# See https://github.com/tyom/kcm
 command -v kcm >/dev/null 2>&1 && exec kcm use -- "$@"
 exec "$@"
 ```

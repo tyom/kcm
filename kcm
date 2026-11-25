@@ -526,7 +526,7 @@ install_wrapper() {
     read -r -p "Location relative to $root [$default]: " path || true
     path="${path:-$default}"
   fi
-  case "$path" in /*) error_exit "Location must be relative to the git root" ;; esac
+  case "$path" in /*|..|../*|*/../*|*/..) error_exit "Location must be inside the git root" ;; esac
   target="$root/$path"
 
   local script
