@@ -186,7 +186,10 @@ add_secret() {
     fi
   elif [ "$2" = "-" ]; then
     # Read from stdin
-    SECRET_VALUE=$(cat)
+    # Strip only the one newline echo or show adds; the x keeps any others
+    SECRET_VALUE=$(cat; printf x)
+    SECRET_VALUE="${SECRET_VALUE%x}"
+    SECRET_VALUE="${SECRET_VALUE%$'\n'}"
 
     if [ -z "$SECRET_VALUE" ]; then
       error_exit "No input received from stdin"
@@ -234,10 +237,16 @@ store_secret() {
   account="${account:-$USER}"
   hex=$(printf '%s' "$value" | xxd -p | tr -d '\n')
   cmd="add-generic-password -U -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex"
-  if [ ${#cmd} -lt 4000 ]; then
+  # security -i silently truncates lines over 4095 bytes. Drop the source path before
+  # giving up on stdin, so the metadata never pushes a value onto argv.
+  if [ ${#cmd} -ge 4096 ] && [[ "$comment" == *" from "* ]]; then
+    comment="${comment%% from *}"
+    cmd="add-generic-password -U -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex"
+  fi
+  if [ ${#cmd} -lt 4096 ]; then
     printf '%s\n' "$cmd" | security -i >/dev/null 2>&1
   else
-    # shortcut: security -i reads at most ~4 KB per line, so values over ~2 KB still go through argv
+    # shortcut: security -i reads at most 4095 bytes per line, so values over ~2 KB still go through argv
     security add-generic-password -U -s "$name" -a "$account" -D "kcm secret" -c "kcm " -j "$comment" \
       -X "$hex" >/dev/null 2>&1 || return 1
   fi
@@ -311,7 +320,7 @@ process_env_file() {
     # Inside a multiline value, until a line with the closing quote
     if [ -n "$quote_char" ]; then
       if find_closing_quote "$line" "$quote_char"; then
-        [ -n "$_KCM_QUOTED_VALUE" ] && var_value+=$'\n'"$_KCM_QUOTED_VALUE"
+        var_value+=$'\n'"$_KCM_QUOTED_VALUE"
         quote_char=""
         add_env_value "$var_name" "$var_value" "$start:$lineno"
       else
@@ -422,8 +431,9 @@ merge_env_files() {
   for k in "${!_KCM_MERGED_NAMES[@]}"; do
     value="${_KCM_MERGED_VALUES[$k]}"
     [[ "$value" == keychain://* ]] && ! is_exported "${_KCM_MERGED_NAMES[$k]}" || continue
-    if value=$(read_secret "${value#keychain://}") && [ -n "$value" ]; then
-      _KCM_MERGED_VALUES[k]="$value"
+    # The x keeps trailing newlines
+    if value=$(read_secret "${value#keychain://}" && printf x) && [ "$value" != x ]; then
+      _KCM_MERGED_VALUES[k]="${value%x}"
     else
       info "Warning: ${_KCM_MERGED_VALUES[$k]} not found in Keychain, keeping it as is"
     fi
@@ -864,7 +874,7 @@ import_secrets() {
       while [[ "$label" == _* ]]; do label="${label#_}"; done
       labels[n]="$label"; kc_states[n]=""; kc_values[n]=""
       if [[ "$in_keychain" == *$'\n'"$label"$'\n'* ]]; then
-        if existing=$(read_secret "$label"); then kc_states[n]=readable; kc_values[n]="$existing"
+        if existing=$(read_secret "$label" && printf x); then existing="${existing%x}"; kc_states[n]=readable; kc_values[n]="$existing"
         else kc_states[n]=unreadable; fi
         if [ "${kc_states[n]}" = unreadable ]; then
           state="${state:+$state, }in Keychain, unreadable"; tint="$_KCM_YELLOW"
@@ -939,7 +949,7 @@ import_secrets() {
 
   # Choose a Keychain label for each picked value. action: store, ref (already there) or skip
   local repo label existing found answer j clash_with shown
-  local -a actions=()
+  local -a actions=() ref_values=()
   repo=$(find_git_root 2>/dev/null || pwd -P)
   repo=$(printf '%s' "${repo##*/}" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')
   for (( i=0; i<n; i++ )); do
@@ -965,14 +975,16 @@ import_secrets() {
         found=true; existing="${kc_values[i]}"
         [ "${kc_states[i]}" = unreadable ] && shown="unreadable"
       elif [ "$found" = false ]; then
-        if existing=$(read_secret "$label"); then
-          found=true
+        if existing=$(read_secret "$label" && printf x); then
+          existing="${existing%x}"; found=true
         elif keychain_entry_exists "$label"; then
           # Exists but kcm can't read it: never overwrite it unasked
           found=true; existing=""; shown="unreadable"
         fi
       fi
       if [ "$found" = false ]; then actions[i]=store; break; fi
+      # What the reference should find when the file is rewritten; unreadable entries can only be checked for existence
+      if [ -n "$shown" ]; then ref_values[i]="?"; else ref_values[i]="=$existing"; fi
       if [ -z "$shown" ] && [ "$existing" = "${values[i]}" ]; then actions[i]=ref; break; fi
 
       info "$label is $clash_with with a different value (${shown:-$(mask_value "$existing")}) than ${files[i]} ($(mask_value "${values[i]}"))"
@@ -1040,6 +1052,20 @@ import_secrets() {
         if [ "${labels[j]}" = "${labels[i]}" ]; then actions[j]=skip; fi
       done
     fi
+  done
+
+  # The prompts give another process time to change a kept entry: check it still holds that value
+  local got
+  for (( i=0; i<n; i++ )); do
+    [ "${actions[i]}" = ref ] || continue
+    if [ "${ref_values[i]}" = "?" ]; then
+      keychain_entry_exists "${labels[i]}" && continue
+    elif got=$(read_secret "${labels[i]}" && printf x) && [ "=$got" = "${ref_values[i]}x" ]; then
+      continue
+    fi
+    info "Warning: ${labels[i]} changed in Keychain during import, leaving ${names[i]} in ${files[i]} as is"
+    actions[i]=skip
+    failed=true
   done
 
   local -a specs
@@ -1111,8 +1137,9 @@ show_secret() {
   local value
 
   # Get the secret value
-  if value=$(read_secret "$KEY_NAME") && [ -n "$value" ]; then
-    printf '%s\n' "$value"
+  # The x keeps trailing newlines, so show | add round-trips the exact value
+  if value=$(read_secret "$KEY_NAME" && printf x) && [ "$value" != x ]; then
+    printf '%s\n' "${value%x}"
   else
     error_exit "Secret '$KEY_NAME' not found in Keychain"
   fi

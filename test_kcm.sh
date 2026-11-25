@@ -36,7 +36,7 @@ cleanup() {
     security delete-generic-password -s "TEST_PATTERN_TWO" >/dev/null 2>&1 || true
     security delete-generic-password -s "OTHER_PATTERN" >/dev/null 2>&1 || true
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY; do
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -188,6 +188,16 @@ printf 'ML=keychain://%s\n' "$TEST_KEY" > "$TEST_DIR/ml.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/ml.env" -- bash -c 'printf "%s" "$ML"' 2>/dev/null)
 assert_equals "$secret" "$output" "Multiline secret resolved by use"
 
+# show | add keeps trailing newlines, so it can retag an entry without changing its value
+printf 'abc\n\n' | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
+"$SCRIPT_PATH" show "$TEST_KEY" | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
+assert_equals "$(printf 'abc\n\nx')" "$("$SCRIPT_PATH" show "$TEST_KEY"; printf x)" "show piped to add keeps a trailing newline"
+
+# A value near the security -i line limit still stores whole
+long=$(head -c 2020 /dev/zero | tr '\0' 'v')
+printf '%s' "$long" | "$SCRIPT_PATH" add "${TEST_KEY}_LONG" - >/dev/null 2>&1
+assert_equals "$long" "$("$SCRIPT_PATH" show "${TEST_KEY}_LONG" 2>&1)" "Stores a value near the security -i line limit"
+
 # Updating an entry saved under another account replaces it instead of adding a second one
 "$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1
 security add-generic-password -s "$TEST_KEY" -a "kcm-test-other" -w old >/dev/null 2>&1
@@ -266,6 +276,11 @@ assert_equals "quoted value" "$output" "Double quoted value handled"
 
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$SINGLE_QUOTED"' 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "single quoted" "$output" "Single quoted value handled"
+
+# A closing quote on its own line keeps the line break before it, as dotenv does
+printf 'TRAILING="line 1\n"\n' > "$TEST_DIR/trail.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/trail.env" -- bash -c 'printf "%sx" "$TRAILING"' 2>&1)
+assert_equals "$(printf 'line 1\nx')" "$output" "Keeps the line break before a closing quote on its own line"
 
 # Test 14a: Multiline values
 cat > "$TEST_ENV" << 'EOF'
@@ -616,6 +631,8 @@ assert_equals "600" "$(/usr/bin/stat -f %Lp "$IMP/link.env")" "Import keeps a sy
 printf '%s_NL_KEY="abc\n\n"\n' "$TEST_KEY" > "$IMP/nl.env"
 (cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import -e nl.env >/dev/null 2>&1)
 assert_equals "${TEST_KEY}_NL_KEY=\"keychain://${TEST_KEY}_NL_KEY\"" "$(cat "$IMP/nl.env")" "Import replaces a value with a trailing newline"
+output=$("$SCRIPT_PATH" use -e "$IMP/nl.env" -- bash -c "printf '%sx' \"\$${TEST_KEY}_NL_KEY\"" 2>&1)
+assert_equals "$(printf 'abc\n\nx')" "$output" "use resolves an imported value with its trailing newlines"
 
 # A public name stays unticked even when Keychain has the same value
 echo "pk-same" | "$SCRIPT_PATH" add "NEXT_PUBLIC_${TEST_KEY}_KEY" - >/dev/null 2>&1
@@ -629,6 +646,14 @@ printf '%s_MOVED_KEY=sk-moved-1\n' "$TEST_KEY" > "$IMP/moved.env"
   | "$SCRIPT_PATH" import -e moved.env >/dev/null 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "$(printf 'PORT=3000\n%s_MOVED_KEY=sk-moved-1' "$TEST_KEY")" "$(cat "$IMP/moved.env")" "Import leaves a file changed during the prompts alone"
 assert_exit_code 1 "$exit_code" "Import exits 1 when a file changed during the prompts"
+
+# A kept Keychain value that changes during the prompts is not referenced
+echo "sk-ref-1" | "$SCRIPT_PATH" add "${TEST_KEY}_REF_KEY" - >/dev/null 2>&1
+printf '%s_REF_KEY=sk-ref-1\n' "$TEST_KEY" > "$IMP/ref.env"
+(cd "$IMP" && { printf '\n'; sleep 2; echo "sk-ref-2" | "$SCRIPT_PATH" add "${TEST_KEY}_REF_KEY" - >/dev/null 2>&1; printf 'y\n'; } \
+  | "$SCRIPT_PATH" import -e ref.env >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+assert_equals "${TEST_KEY}_REF_KEY=sk-ref-1" "$(cat "$IMP/ref.env")" "Import keeps the plain value when the Keychain value changed"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a kept Keychain value changed"
 
 # A file kcm can't rewrite makes import fail
 RO="$TEST_DIR/readonly"

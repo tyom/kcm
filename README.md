@@ -223,7 +223,7 @@ When you run `kcm use -- <command>`, all `keychain://` references are resolved f
 Parsing rules:
 
 - Values are passed to the command as plain text. kcm never runs them through a shell, so `$`, `&` or `;` in a value stay as they are.
-- Single or double quotes around a value are removed. A quoted value can span several lines.
+- Single or double quotes around a value are removed. A quoted value can span several lines. A closing quote on a line of its own keeps the line break before it, as in dotenv.
 - Text after the closing quote is ignored, so `API_KEY="keychain://API_KEY" # staging` works. In an unquoted value, a `#` is part of the value.
 - An `export ` prefix is allowed: `export PORT=3000`.
 - Lines starting with `#`, blank lines and lines without a valid variable name are skipped.
