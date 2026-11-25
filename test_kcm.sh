@@ -35,6 +35,10 @@ cleanup() {
     security delete-generic-password -s "TEST_PATTERN_ONE" >/dev/null 2>&1 || true
     security delete-generic-password -s "TEST_PATTERN_TWO" >/dev/null 2>&1 || true
     security delete-generic-password -s "OTHER_PATTERN" >/dev/null 2>&1 || true
+    security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY; do
+        security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
+    done
 
     # Remove test directory
     rm -rf "$TEST_DIR"
@@ -94,6 +98,11 @@ assert_not_contains() {
     fi
 }
 
+# Drop colour and cursor escape codes, and the carriage returns a pty adds
+strip_ansi() {
+    sed $'s/\033\\[[0-9;?]*[A-Za-z]//g' | tr -d '\r'
+}
+
 assert_exit_code() {
     local expected="$1"
     local actual="$2"
@@ -120,6 +129,12 @@ assert_exit_code 0 "$exit_code" "Help command exits successfully"
 assert_contains "$output" "kcm - Keychain Master" "Help shows title"
 assert_contains "$output" "USAGE:" "Help shows usage"
 
+# Piped help stays plain text for scripts; in a terminal it is coloured
+output=$("$SCRIPT_PATH" help 2>&1)
+assert_not_contains "$output" $'\033' "Piped help has no colour codes"
+output=$(NO_COLOR='' script -q /dev/null "$SCRIPT_PATH" help </dev/null 2>&1)
+assert_contains "$output" $'\033[1;97;100m add ' "Help in a terminal shows commands as chips"
+
 # Test 2: Version command
 output=$("$SCRIPT_PATH" version 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "Version command exits successfully"
@@ -133,6 +148,12 @@ echo "-----------------------------"
 echo "test123" | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1 && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "Add secret via stdin"
 
+# kcm marks its entries so they stand out in Keychain Access
+attrs=$(security find-generic-password -s "$TEST_KEY" 2>&1)
+assert_contains "$attrs" '"desc"<blob>="kcm secret"' "Added secret has kind 'kcm secret'"
+assert_contains "$attrs" '"crtr"<uint32>="kcm "' "Added secret has creator code 'kcm '"
+assert_contains "$attrs" '"icmt"<blob>="Added by kcm"' "Added secret has a comment"
+
 # Test 4: Show secret
 output=$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "Show secret exits successfully"
@@ -142,6 +163,17 @@ assert_equals "test123" "$output" "Show returns correct secret value"
 output=$("$SCRIPT_PATH" ls 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "List command exits successfully"
 assert_contains "$output" "$TEST_KEY" "List shows test key"
+
+# ls shows kcm's entries, then untagged ones from older kcm versions, and hides other apps' entries
+security add-generic-password -s "${TEST_KEY}_LEGACY" -a "$USER" -w old >/dev/null 2>&1
+security add-generic-password -s "${TEST_KEY}_OTHER_APP" -a "some-app" -w x >/dev/null 2>&1
+output=$("$SCRIPT_PATH" ls "${TEST_KEY}*" 2>&1 | strip_ansi)
+kcm_part="${output%%older kcm*}"
+legacy_part="${output#*older kcm}"
+assert_contains "$kcm_part" "• $TEST_KEY"$'\n' "List shows kcm entries first"
+assert_not_contains "$kcm_part" "${TEST_KEY}_LEGACY" "List keeps untagged entries out of the kcm group"
+assert_contains "$legacy_part" "• ${TEST_KEY}_LEGACY" "List shows untagged entries from older kcm separately"
+assert_not_contains "$output" "${TEST_KEY}_OTHER_APP" "List hides other apps' entries"
 
 # Test 6: Remove secret
 "$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
@@ -155,6 +187,16 @@ assert_equals "$secret" "$output" "Multiline secret shown as stored"
 printf 'ML=keychain://%s\n' "$TEST_KEY" > "$TEST_DIR/ml.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/ml.env" -- bash -c 'printf "%s" "$ML"' 2>/dev/null)
 assert_equals "$secret" "$output" "Multiline secret resolved by use"
+
+# show | add keeps trailing newlines, so it can retag an entry without changing its value
+printf 'abc\n\n' | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
+"$SCRIPT_PATH" show "$TEST_KEY" | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
+assert_equals "$(printf 'abc\n\nx')" "$("$SCRIPT_PATH" show "$TEST_KEY"; printf x)" "show piped to add keeps a trailing newline"
+
+# A value near the security -i line limit still stores whole
+long=$(head -c 2020 /dev/zero | tr '\0' 'v')
+printf '%s' "$long" | "$SCRIPT_PATH" add "${TEST_KEY}_LONG" - >/dev/null 2>&1
+assert_equals "$long" "$("$SCRIPT_PATH" show "${TEST_KEY}_LONG" 2>&1)" "Stores a value near the security -i line limit"
 
 # Updating an entry saved under another account replaces it instead of adding a second one
 "$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1
@@ -218,6 +260,11 @@ cat >> "$TEST_ENV" << EOF
 KEYCHAIN_VAR=keychain://${TEST_KEY}_QUOTE
 EOF
 
+# A file named "environment" is a file like any other, not the exported-variable marker
+printf 'FROM_FILE=keychain://%s_QUOTE\n' "$TEST_KEY" > "$TEST_DIR/environment"
+output=$(cd "$TEST_DIR" && "$SCRIPT_PATH" use -e environment -- printenv FROM_FILE 2>&1)
+assert_equals "keychain_secret" "$output" "Resolves references from a file named environment"
+
 # Test 13: Use command with env file
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$SIMPLE_VAR"' 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "Use command with env file"
@@ -229,6 +276,11 @@ assert_equals "quoted value" "$output" "Double quoted value handled"
 
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$SINGLE_QUOTED"' 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "single quoted" "$output" "Single quoted value handled"
+
+# A closing quote on its own line keeps the line break before it, as dotenv does
+printf 'TRAILING="line 1\n"\n' > "$TEST_DIR/trail.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/trail.env" -- bash -c 'printf "%sx" "$TRAILING"' 2>&1)
+assert_equals "$(printf 'line 1\nx')" "$output" "Keeps the line break before a closing quote on its own line"
 
 # Test 14a: Multiline values
 cat > "$TEST_ENV" << 'EOF'
@@ -478,6 +530,199 @@ assert_equals "mine" "$(cat "$WRAP/bin/other")" "Existing file left unchanged"
 output=$(cd "$WRAP" && "$SCRIPT_PATH" install-wrapper ../outside/with-env 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 1 "$exit_code" "Rejects a location outside the git root"
 [ ! -e "$TEST_DIR/outside/with-env" ] && pass "Writes nothing outside the git root" || fail "Writes nothing outside the git root"
+echo
+echo "Test Group: Import"
+echo "------------------"
+IMP="$TEST_DIR/import"
+mkdir -p "$IMP"
+
+# A likely secret is pre-ticked: Enter accepts the list, y confirms
+cat > "$IMP/.env" << EOF
+# config
+${TEST_KEY}_API_KEY=sk-test-123
+PORT=3000
+EOF
+(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "sk-test-123" "$("$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" 2>&1)" "Import stores a detected secret"
+assert_equals "$(printf '# config\n%s="keychain://%s"\nPORT=3000' "${TEST_KEY}_API_KEY" "${TEST_KEY}_API_KEY")" "$(cat "$IMP/.env")" "Import replaces only the imported line"
+attrs=$(security find-generic-password -s "${TEST_KEY}_API_KEY" 2>&1)
+assert_contains "$attrs" "\"icmt\"<blob>=\"Imported by kcm from $(cd "$IMP" && pwd -P)/.env\"" "Imported secret's comment names its source file"
+assert_contains "$attrs" '"desc"<blob>="kcm secret"' "Imported secret has kind 'kcm secret'"
+
+# A newline in the source path must not start a second security -i command
+INJ="$TEST_DIR/inj"$'\n'"add-generic-password -s ${TEST_KEY}_INJECTED -a x -w y"$'\n'"z"
+mkdir -p "$INJ"
+"$SCRIPT_PATH" remove "${TEST_KEY}_API_KEY" >/dev/null 2>&1
+echo "${TEST_KEY}_API_KEY=sk-test-456" > "$INJ/.env"
+(cd "$INJ" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "sk-test-456" "$("$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" 2>&1)" "Import stores from a path with a newline"
+security find-generic-password -s "${TEST_KEY}_INJECTED" >/dev/null 2>&1 \
+  && fail "Newline in path runs no extra security command" || pass "Newline in path runs no extra security command"
+
+# A multiline quoted value is stored whole and its extra lines are removed
+cat > "$IMP/.env" << EOF
+export ${TEST_KEY}_MULTI="-----BEGIN KEY-----
+abc
+-----END KEY-----" # pem
+AFTER=1
+EOF
+(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "$(printf -- '-----BEGIN KEY-----\nabc\n-----END KEY-----')" "$("$SCRIPT_PATH" show "${TEST_KEY}_MULTI" 2>&1)" "Import stores a multiline value whole"
+assert_equals "$(printf 'export %s="keychain://%s"\nAFTER=1' "${TEST_KEY}_MULTI" "${TEST_KEY}_MULTI")" "$(cat "$IMP/.env")" "Import collapses a multiline value to one reference line"
+
+# A name already in Keychain with another value: keep it, or rename the new one
+echo "old-value" | "$SCRIPT_PATH" add "${TEST_KEY}_CLASH" - >/dev/null 2>&1
+echo "${TEST_KEY}_CLASH=new-value" > "$IMP/.env"
+(cd "$IMP" && printf '\nk\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "old-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_CLASH" 2>&1)" "Import keep leaves the Keychain value"
+assert_equals "${TEST_KEY}_CLASH=\"keychain://${TEST_KEY}_CLASH\"" "$(cat "$IMP/.env")" "Import keep references the existing entry"
+
+echo "${TEST_KEY}_CLASH=new-value" > "$IMP/.env"
+(cd "$IMP" && printf '\nr\n%s\ny\n' "${TEST_KEY}_RENAMED" | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "new-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_RENAMED" 2>&1)" "Import rename stores under the new name"
+assert_equals "${TEST_KEY}_CLASH=\"keychain://${TEST_KEY}_RENAMED\"" "$(cat "$IMP/.env")" "Import rename references the new name"
+
+# Quitting at the confirmation changes nothing; the list ticks likely secrets and masks values
+"$SCRIPT_PATH" remove "${TEST_KEY}_API_KEY" >/dev/null 2>&1
+cat > "$IMP/.env" << EOF
+${TEST_KEY}_API_KEY=sk-live-abcdefghijklmnopqrstuvwxyz
+DB=postgres://user:pw@localhost/db
+NEXT_PUBLIC_MAP_KEY=pk-public
+PORT=3000
+EOF
+before=$(cat "$IMP/.env")
+output=$(cd "$IMP" && printf '\n' | "$SCRIPT_PATH" import 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "Import cancelled at the confirmation exits 1"
+assert_equals "$before" "$(cat "$IMP/.env")" "Import cancelled leaves the file unchanged"
+"$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" >/dev/null 2>&1 && fail "Import cancelled stores nothing" || pass "Import cancelled stores nothing"
+assert_not_contains "$output" "abcdefghijklmnop" "Import list masks values"
+assert_contains "$output" "[x]  1  ${TEST_KEY}_API_KEY" "Import ticks a secret by name"
+assert_contains "$output" "[x]  2  DB" "Import ticks a URL with a password"
+assert_contains "$output" "[ ]  3  NEXT_PUBLIC_MAP_KEY" "Import leaves public-prefixed names unticked"
+assert_contains "$output" "[ ]  4  PORT" "Import leaves plain settings unticked"
+assert_contains "$(grep "${TEST_KEY}_API_KEY" <<< "$output")" "name has KEY, starts with sk-" "Import notes say which word and prefix matched"
+assert_contains "$(grep ' DB ' <<< "$output")" "URL with password" "Import notes a URL with a password"
+assert_contains "$(grep NEXT_PUBLIC_MAP_KEY <<< "$output")" "name has KEY · public, so unticked" "Import notes why a public name is unticked"
+
+# The same name in two files: the closer, higher-priority file gets the plain name.
+# A git-tracked file is listed but not ticked.
+IG="$TEST_DIR/import-git"
+mkdir -p "$IG"
+git -C "$IG" init -q
+echo "${TEST_KEY}_API_KEY=shared-value" > "$IG/.env"
+git -C "$IG" add .env
+echo "${TEST_KEY}_API_KEY=local-value" > "$IG/.env.local"
+"$SCRIPT_PATH" remove "${TEST_KEY}_API_KEY" >/dev/null 2>&1
+"$SCRIPT_PATH" remove "${TEST_KEY}_RENAMED" >/dev/null 2>&1
+output=$(cd "$IG" && printf '2\n\nr\n%s\ny\n' "${TEST_KEY}_RENAMED" | "$SCRIPT_PATH" import 2>&1)
+assert_contains "$output" "[ ]  2  ${TEST_KEY}_API_KEY  ./.env" "Import leaves a git-tracked file unticked"
+assert_equals "local-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" 2>&1)" "Import gives the plain name to .env.local"
+assert_equals "shared-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_RENAMED" 2>&1)" "Import stores the clashing .env value under the new name"
+assert_equals "${TEST_KEY}_API_KEY=\"keychain://${TEST_KEY}_RENAMED\"" "$(cat "$IG/.env")" "Import points .env at the renamed entry"
+
+# A symlinked env file keeps its target's permissions when rewritten
+printf '%s_LINK_KEY=sk-link-1\n' "$TEST_KEY" > "$IMP/real.env"
+chmod 600 "$IMP/real.env"
+ln -s real.env "$IMP/link.env"
+(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import -e link.env >/dev/null 2>&1)
+assert_equals "600" "$(/usr/bin/stat -f %Lp "$IMP/link.env")" "Import keeps a symlinked file's permissions"
+
+# A value ending in a newline still reads back, so its line is replaced
+printf '%s_NL_KEY="abc\n\n"\n' "$TEST_KEY" > "$IMP/nl.env"
+(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import -e nl.env >/dev/null 2>&1)
+assert_equals "${TEST_KEY}_NL_KEY=\"keychain://${TEST_KEY}_NL_KEY\"" "$(cat "$IMP/nl.env")" "Import replaces a value with a trailing newline"
+output=$("$SCRIPT_PATH" use -e "$IMP/nl.env" -- bash -c "printf '%sx' \"\$${TEST_KEY}_NL_KEY\"" 2>&1)
+assert_equals "$(printf 'abc\n\nx')" "$output" "use resolves an imported value with its trailing newlines"
+
+# A public name stays unticked even when Keychain has the same value
+echo "pk-same" | "$SCRIPT_PATH" add "NEXT_PUBLIC_${TEST_KEY}_KEY" - >/dev/null 2>&1
+printf 'NEXT_PUBLIC_%s_KEY=pk-same\n' "$TEST_KEY" > "$IMP/pub.env"
+output=$(cd "$IMP" && printf '\n' | "$SCRIPT_PATH" import -e pub.env 2>&1)
+assert_contains "$output" "[ ]  1  NEXT_PUBLIC_${TEST_KEY}_KEY" "Import leaves a public name unticked when Keychain has its value"
+
+# A file edited while kcm asks is left alone
+printf '%s_MOVED_KEY=sk-moved-1\n' "$TEST_KEY" > "$IMP/moved.env"
+(cd "$IMP" && { printf '\n'; sleep 2; printf 'PORT=3000\n%s_MOVED_KEY=sk-moved-1\n' "$TEST_KEY" > moved.env; printf 'y\n'; } \
+  | "$SCRIPT_PATH" import -e moved.env >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+assert_equals "$(printf 'PORT=3000\n%s_MOVED_KEY=sk-moved-1' "$TEST_KEY")" "$(cat "$IMP/moved.env")" "Import leaves a file changed during the prompts alone"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a file changed during the prompts"
+
+# A file edited while kcm stores values is left alone: a security wrapper edits it mid-store
+MID="$TEST_DIR/mid"
+mkdir -p "$MID/bin"
+cat > "$MID/bin/security" << 'EOF'
+#!/bin/bash
+if [ "${1:-}" = -i ]; then
+  { printf 'PORT=3000\n'; cat "$MID_FILE"; } > "$MID_FILE.new" && mv "$MID_FILE.new" "$MID_FILE"
+fi
+exec /usr/bin/security "$@"
+EOF
+chmod +x "$MID/bin/security"
+printf '%s_MID_KEY=sk-mid-1\n' "$TEST_KEY" > "$MID/.env"
+(cd "$MID" && printf '\ny\n' | MID_FILE="$MID/.env" PATH="$MID/bin:$PATH" "$SCRIPT_PATH" import >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+assert_equals "$(printf 'PORT=3000\n%s_MID_KEY=sk-mid-1' "$TEST_KEY")" "$(cat "$MID/.env")" "Import leaves a file changed during the store alone"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a file changed during the store"
+
+# A kept Keychain value that changes during the prompts is not referenced
+echo "sk-ref-1" | "$SCRIPT_PATH" add "${TEST_KEY}_REF_KEY" - >/dev/null 2>&1
+printf '%s_REF_KEY=sk-ref-1\n' "$TEST_KEY" > "$IMP/ref.env"
+(cd "$IMP" && { printf '\n'; sleep 2; echo "sk-ref-2" | "$SCRIPT_PATH" add "${TEST_KEY}_REF_KEY" - >/dev/null 2>&1; printf 'y\n'; } \
+  | "$SCRIPT_PATH" import -e ref.env >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+assert_equals "${TEST_KEY}_REF_KEY=sk-ref-1" "$(cat "$IMP/ref.env")" "Import keeps the plain value when the Keychain value changed"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a kept Keychain value changed"
+
+# Two picked values overwriting one label: only the file whose value won gets the reference
+DUP="$TEST_DIR/dup"
+mkdir -p "$DUP"
+printf '%s_DUP_KEY=sk-dup-a\n' "$TEST_KEY" > "$DUP/.env"
+printf '%s_DUP_KEY=sk-dup-b\n' "$TEST_KEY" > "$DUP/.env.local"
+(cd "$DUP" && printf '\no\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+kept=$("$SCRIPT_PATH" show "${TEST_KEY}_DUP_KEY" 2>&1)
+plain=$(cat "$DUP/.env" "$DUP/.env.local" | grep -c '=sk-dup-' || true)
+assert_equals "1" "$plain" "Import keeps the overwritten value in its file"
+assert_not_contains "$(cat "$DUP/.env" "$DUP/.env.local")" "=$kept" "Import leaves no plain copy of the stored value"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a picked value was overwritten"
+
+# A file kcm can't rewrite makes import fail
+RO="$TEST_DIR/readonly"
+mkdir -p "$RO"
+printf '%s_RO_KEY=sk-ro-1\n' "$TEST_KEY" > "$RO/.env"
+chmod 555 "$RO"
+(cd "$RO" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+chmod 755 "$RO"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a file can't be rewritten"
+
+# In a terminal: space toggles, the down arrow moves, Enter accepts.
+# script runs kcm on a pseudo-terminal so it uses the key-driven list.
+"$SCRIPT_PATH" remove "${TEST_KEY}_API_KEY" >/dev/null 2>&1
+"$SCRIPT_PATH" remove "${TEST_KEY}_CLASH" >/dev/null 2>&1
+printf '%s\n' "${TEST_KEY}_API_KEY=first" "${TEST_KEY}_CLASH=second" > "$IMP/.env"
+(cd "$IMP" && printf ' \033[B\ny\n' | script -q /dev/null "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "$(printf '%s=first\n%s="keychain://%s"' "${TEST_KEY}_API_KEY" "${TEST_KEY}_CLASH" "${TEST_KEY}_CLASH")" "$(cat "$IMP/.env")" "Import picks with arrow keys and space in a terminal"
+
+# The list marks names already in Keychain and shows existing references
+echo "same" | "$SCRIPT_PATH" add "${TEST_KEY}_API_KEY" - >/dev/null 2>&1
+echo "old" | "$SCRIPT_PATH" add "${TEST_KEY}_CLASH" - >/dev/null 2>&1
+cat > "$IMP/.env" << EOF
+${TEST_KEY}_API_KEY=same
+${TEST_KEY}_CLASH=new
+DONE_REF=keychain://${TEST_KEY}_API_KEY
+BROKEN_REF=keychain://${TEST_KEY}_MISSING
+EOF
+output=$(cd "$IMP" && printf '\n' | "$SCRIPT_PATH" import 2>&1 | strip_ansi)
+assert_contains "$output" "${TEST_KEY}_API_KEY  ./.env  ****       name has KEY · in Keychain, same value" "Import marks a name in Keychain with the same value"
+assert_contains "$output" "${TEST_KEY}_CLASH    ./.env  ****       name has KEY · in Keychain, different value" "Import marks a name in Keychain with another value"
+assert_contains "$(grep DONE_REF <<< "$output")" "✓" "Import shows an existing reference as done"
+assert_contains "$(grep BROKEN_REF <<< "$output")" "missing from Keychain" "Import flags a reference missing from Keychain"
+
+# In the key-driven list, the NAME heading starts in the same column as the names
+printf 'LONG_NAME_FOR_ALIGN=plain\n' > "$IMP/.env"
+output=$(cd "$IMP" && printf 'q' | script -q /dev/null "$SCRIPT_PATH" import 2>&1 | strip_ansi)
+header=$(grep -m1 'NAME' <<< "$output"); row=$(grep -m1 'LONG_NAME_FOR_ALIGN' <<< "$output")
+[ -n "$header" ] && [ -n "$row" ] && pass "Import list draws the heading and row" || fail "Import list draws the heading and row"
+header="${header%%NAME*}"; row="${row%%LONG_NAME_FOR_ALIGN*}"
+assert_equals "${#header}" "${#row}" "Import list headings line up with the columns"
+
 echo
 echo "Test Group: Pattern Matching"
 echo "----------------------------"

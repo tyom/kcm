@@ -63,6 +63,39 @@ After adding, you'll get a `.env` entry like:
 DATABASE_URL="keychain://DATABASE_URL"
 ```
 
+### Importing existing .env values
+
+Move plain values you already have in env files into the Keychain:
+
+```bash
+kcm import                  # scan env files from here up to the git root
+kcm import -e .env.local    # or a single file
+```
+
+kcm lists every plain value with a masked preview and ticks the ones that look like secrets: names with KEY, SECRET, TOKEN, PASSWORD and similar, known token prefixes (`sk-`, `ghp_`, `AKIA`…), URLs with a password, private keys and long random strings. NOTES says what matched. After the `·` it says what changed the default, such as a public prefix, a file tracked by git or an existing Keychain entry.
+
+```
+       NAME                    FILE          VALUE      NOTES
+> [x]  OPENAI_API_KEY          ./.env.local  sk-p…9f2c  name has KEY, starts with sk-
+  [x]  STRIPE_KEY              ./.env.local  sk_l…a1b2  name has KEY, starts with sk_live_ · in Keychain, same value
+  [x]  GITHUB_TOKEN            ./.env.local  ghp_…0123  name has TOKEN, starts with ghp_ · in Keychain, different value
+  [ ]  EXPO_PUBLIC_SENTRY_DSN  ./.env.local  http…6848  name has DSN, looks random · public, so unticked
+  [ ]  PORT                    ./.env        ****
+  ✓    DATABASE_URL            ./.env.local             keychain://DATABASE_URL
+  !    REDIS_URL               ./.env.local             keychain://REDIS_URL missing from Keychain
+↑/↓ move  space toggle  a all  enter continue  q quit
+```
+
+Names already in the Keychain stand out. Green means the Keychain has the same value, so kcm only writes the reference. Yellow means it has a different value, and kcm asks what to do after you press Enter. Lines that already hold a `keychain://` reference are listed at the end and can't be picked: dimmed with ✓ when the entry exists, yellow with ! when it's missing.
+
+Use ↑/↓ (or `j`/`k`) to move, Space to tick or untick, `a` to tick all (or untick all when everything is ticked) and Enter to continue. Long lists scroll. When input isn't a terminal, for example piped from a script, kcm prints a numbered list instead and reads numbers or ranges such as `3` or `1-2`.
+
+- Each value is stored under its variable name, without leading underscores (`_TOKEN` is stored as `TOKEN`). If that name is already in the Keychain with a different value, kcm asks whether to overwrite it, keep the Keychain value, store under another name (default `<REPO>_<NAME>`) or skip.
+- Files tracked by git and names with a public prefix (`NEXT_PUBLIC_`, `VITE_` and similar) are never ticked for you. If you import from a tracked file, rotate the secret: the old value stays in git history.
+- After a final confirmation, kcm stores each value, reads it back, and only then replaces its line with `NAME="keychain://LABEL"`. A comment after the value goes with it. Other lines stay as they are. kcm keeps no backup, since it would hold the plain values.
+- Without `-e`, every `.env` and `.env.*` file is scanned, not only the current `NODE_ENV`. Files ending in `.example`, `.sample` or `.template` are skipped.
+- Quitting at any prompt changes nothing.
+
 ### Using Secrets in Applications
 
 Run any command with secrets from your `.env` file automatically resolved:
@@ -156,15 +189,15 @@ kcm show DATABASE_URL
 # Copy to clipboard (cleared after 45 seconds, unless you copied something else since)
 kcm copy API_KEY
 
-# List all accessible secrets
+# List kcm's secrets
 kcm ls
 
 # List secrets matching a pattern
 kcm ls "DATABASE*"
 kcm ls "*_KEY"
 
-# Note: Only shows secrets that kcm can access
-# Some app-specific secrets may have access restrictions
+# Other apps' entries are hidden. Untagged entries that look like
+# an older kcm added them are listed in a separate group
 
 # Remove a secret
 kcm remove OLD_API_KEY
@@ -190,7 +223,7 @@ When you run `kcm use -- <command>`, all `keychain://` references are resolved f
 Parsing rules:
 
 - Values are passed to the command as plain text. kcm never runs them through a shell, so `$`, `&` or `;` in a value stay as they are.
-- Single or double quotes around a value are removed. A quoted value can span several lines.
+- Single or double quotes around a value are removed. A quoted value can span several lines. A closing quote on a line of its own keeps the line break before it, as in dotenv.
 - Text after the closing quote is ignored, so `API_KEY="keychain://API_KEY" # staging` works. In an unquoted value, a `#` is part of the value.
 - An `export ` prefix is allowed: `export PORT=3000`.
 - Lines starting with `#`, blank lines and lines without a valid variable name are skipped.
@@ -199,6 +232,8 @@ Parsing rules:
 ## Security
 
 Secrets stay in the macOS Keychain, which encrypts them. `kcm add` passes the value to `security` on stdin, so it doesn't show up in `ps` (values over about 2 KB are the exception). `.env` values are never run as code.
+
+In Keychain Access, kcm's entries show the kind "kcm secret". The comment says where a value came from: "Added by kcm", or "Imported by kcm from ~/Code/app/.env.local". These details are not encrypted, unlike the value. Entries from older versions of kcm get them the next time you add that name, or import a different value under it. An import that finds the same value only writes the reference and leaves the entry as it is.
 
 **See [SECURITY.md](SECURITY.md) for full security policy, best practices, and limitations.**
 

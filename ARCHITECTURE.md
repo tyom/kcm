@@ -34,12 +34,14 @@ All commands follow this pattern with appropriate validation at each step.
 
 Secrets are stored as generic password entries in the macOS login keychain using `security add-generic-password`. The service name is the environment variable name (e.g., `API_KEY`).
 
+Each entry kcm writes also gets kind `kcm secret`, creator code `kcm ` and a comment: `Added by kcm`, or `Imported by kcm from <file>` for `import`. Keychain stores these attributes unencrypted, so they hold no secret data.
+
 ### Environment Resolution
 
 The `use` command:
 
 1. Parses `.env` files line-by-line (never using `eval`)
-2. Resolves `keychain://` references by querying the keychain, except for variables the caller already exported
+2. Merges the files, then resolves `keychain://` references in the winning values by querying the keychain, except for variables the caller already exported
 3. Exports variables not already in the environment and executes the user command via `exec`
 
 ## Security Architecture
@@ -92,6 +94,10 @@ Replaces the script process with the target command, ensuring:
 ### Keychain Operations
 
 `store_secret` writes a value as hex through `security -i` on stdin, then reads it back, because `security -i` exits 0 even when a command fails. `read_secret` parses `security find-generic-password -g`, since `-w` prints hex for values with newlines.
+
+### Import
+
+`import` parses env files directly (the parser never resolves references), so `keychain://` values stay as text, and uses the line range the parser records for each assignment. It stores every picked value with `store_secret` (which reads it back) before touching any file, then rewrites each file once through a temp file in the same folder and `mv`. A failed store leaves its line as it was. A file whose checksum changed since the scan is skipped, since its line ranges no longer hold. It is checked after the prompts and again just before `mv`. This narrows the window but is not atomic: an edit between the last check and `mv` is overwritten. A failed store or rewrite, a file that changed after the scan, or a readable Keychain entry that no longer holds the expected value makes `import` exit 1. Values you chose to skip do not. An entry kcm cannot read, kept at the prompt, is only checked for existence, so a change to its value goes unnoticed. A value the Keychain already holds is only referenced, so that entry keeps its old attributes. There is no backup file, because it would keep the plain values on disk.
 
 ### Environment Processing
 
