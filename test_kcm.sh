@@ -352,6 +352,19 @@ output=$(cd "$MONO" && NODE_ENV=production "$SCRIPT_PATH" use -- bash -c 'echo "
 assert_equals "prod" "$output" "NODE_ENV=production loads .env.production"
 
 echo
+echo "Test Group: Command Help"
+echo "------------------------"
+
+# Test: --help after a command shows only that command's help
+output=$("$SCRIPT_PATH" use --help 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 0 "$exit_code" "use --help exits 0"
+assert_contains "$output" "--env-file FILE" "use --help shows use options"
+assert_not_contains "$output" "add KEY_NAME" "use --help hides other commands"
+
+output=$("$SCRIPT_PATH" rm -h 2>&1)
+assert_contains "$output" "Remove a secret from Keychain" "Alias rm -h shows remove help"
+assert_not_contains "$output" "show KEY_NAME" "rm -h hides other commands"
+echo
 echo "Test Group: Pattern Matching"
 echo "----------------------------"
 

@@ -515,6 +515,10 @@ use_secrets() {
         show_values=full
         shift
         ;;
+      -h|--help)
+        show_command_help use
+        exit 0
+        ;;
       --)
         shift
         break
@@ -748,6 +752,22 @@ list_secrets() {
     info "Use '$SCRIPT_NAME copy KEY_NAME' to copy to clipboard"
   fi
 }
+
+# Print one command's section of show_help (headings are the 2-space indented lines)
+show_command_help() {
+  show_help | awk -v cmd="$1" '/^[^ ]/ { p = 0 } /^  [a-z]/ { p = ($1 == cmd) } p'
+}
+
+# `kcm <command> --help` shows that command's help instead of running it
+case "${2:-}" in
+  -h|--help)
+    case "$1" in
+      rm) show_command_help remove; exit 0 ;;
+      list) show_command_help ls; exit 0 ;;
+      add|remove|show|copy|ls|use) show_command_help "$1"; exit 0 ;;
+    esac
+    ;;
+esac
 
 # Main command dispatcher
 case "${1:-}" in
