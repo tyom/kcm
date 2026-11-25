@@ -17,37 +17,9 @@ BLUE='\033[0;34m'
 GREY='\033[90m'
 NC='\033[0m' # No Color
 
-# Array to track clipboard clear PIDs
-declare -a CLIPBOARD_CLEAR_PIDS=()
 # Arrays holding processed env assignments (stay in memory)
 declare -a PROCESSED_ENV_NAMES=()
 declare -a PROCESSED_ENV_VALUES=()
-
-# Global cleanup function
-cleanup() {
-  local exit_code=$?
-
-  exit $exit_code
-}
-
-# Cleanup function for abnormal termination (INT/TERM signals)
-cleanup_on_signal() {
-  # Clear clipboard immediately to prevent secret leakage
-  echo -n "" | pbcopy 2>/dev/null || true
-
-  # Kill all clipboard clear jobs
-  if [ ${#CLIPBOARD_CLEAR_PIDS[@]} -gt 0 ]; then
-    for pid in "${CLIPBOARD_CLEAR_PIDS[@]}"; do
-      kill "$pid" 2>/dev/null || true
-    done
-  fi
-
-  exit 130  # Standard exit code for SIGINT
-}
-
-# Set up signal handlers for graceful cleanup
-trap cleanup EXIT
-trap cleanup_on_signal INT TERM
 
 # Helper functions
 error_exit() {
@@ -127,8 +99,6 @@ COMMANDS:
       -s, --show-values     - Without a command, show masked values (first and last 4 chars)
       --full                - Without a command, show full values (opens in less so they stay
                               out of terminal scrollback; prints plain text when piped)
-      -u, --allow-unsafe    - Allow special characters in env values that are normally blocked
-                              for security (use with caution, only with trusted sources)
 
     Examples:
       kcm use              # list variable names and where they come from
@@ -139,7 +109,6 @@ COMMANDS:
       kcm use -e .env -- npm run dev
       kcm use --env-file ../.env -- make run-server
       kcm use -e .env -- echo \$DATABASE_URL
-      kcm use -u -e secrets.env -- docker run myapp
 
   help
     Show this help message
@@ -147,7 +116,7 @@ COMMANDS:
 ENVIRONMENT VARIABLE FORMAT:
   keychain://LABEL - Retrieved from macOS Keychain
 
-  If a secret cannot be resolved, the original value is used as fallback.
+  If a secret cannot be resolved, kcm warns and keeps the original value.
 
 EOF
 }
@@ -183,7 +152,7 @@ add_secret() {
     # Interactive mode - prompt for value
     info "Enter secret value for $KEY_NAME (input will be hidden):"
     echo -e "${GREY}For long secrets (>1000 chars), use: ${GREEN}pbpaste | $SCRIPT_NAME add $KEY_NAME -${NC}" >&2
-    read -rs SECRET_VALUE
+    IFS= read -rs SECRET_VALUE
     echo "" >&2  # New line after hidden input
 
     if [ -z "$SECRET_VALUE" ]; then
@@ -200,15 +169,11 @@ add_secret() {
     error_exit "Inline values are not supported. Use interactive input or pipe via '-'"
   fi
 
-  # Check if entry already exists
   if keychain_entry_exists "$KEY_NAME"; then
     info "Keychain entry '$KEY_NAME' already exists. Updating..."
-    # Delete existing entry (suppress all output)
-    security delete-generic-password -s "$KEY_NAME" >/dev/null 2>&1
   fi
 
-  # Add to keychain (suppress verbose output)
-  if security add-generic-password -s "$KEY_NAME" -a "$USER" -w "$SECRET_VALUE" -U >/dev/null 2>&1; then
+  if store_secret "$KEY_NAME" "$SECRET_VALUE"; then
     success "Secret added to Keychain"
 
     # Output the .env line
@@ -225,15 +190,34 @@ add_secret() {
   fi
 }
 
-# Function to get value from Keychain
-get_keychain_value() {
-  local label="$1"
-  if command -v security >/dev/null 2>&1; then
-    # Try to get password from keychain, suppress errors
-    security find-generic-password -s "$label" -w 2>/dev/null || echo ""
+# Store a secret, creating or updating it in place.
+# The value goes in as hex on stdin so it never shows in the process list.
+store_secret() {
+  local name="$1" value="$2" hex cmd
+  hex=$(printf '%s' "$value" | xxd -p | tr -d '\n')
+  cmd="add-generic-password -U -s \"$name\" -a \"$USER\" -X $hex"
+  if [ ${#cmd} -lt 4000 ]; then
+    printf '%s\n' "$cmd" | security -i >/dev/null 2>&1
   else
-    echo ""
+    # shortcut: security -i reads at most ~4 KB per line, so values over ~2 KB still go through argv
+    security add-generic-password -U -s "$name" -a "$USER" -X "$hex" >/dev/null 2>&1 || return 1
   fi
+  # security -i exits 0 even when the command fails, so read the value back
+  [ "$(read_secret "$name")" = "$value" ]
+}
+
+# Print a secret's value.
+# -w prints hex once a value has a newline or other non-printable byte, so parse -g instead:
+# it prints `password: "value"` or `password: 0x<hex>  "<escaped>"`.
+read_secret() {
+  local out
+  out=$(security find-generic-password -s "$1" -g 2>&1 >/dev/null) || return 1
+  out=$(sed -n 's/^password: //p' <<< "$out")
+  case "$out" in
+    0x*) out="${out%% *}"; xxd -r -p <<< "${out#0x}" ;;
+    \"*\") out="${out#\"}"; printf '%s' "${out%\"}" ;;
+    *) return 1 ;;
+  esac
 }
 
 # Check if a keychain entry exists
@@ -242,151 +226,65 @@ keychain_entry_exists() {
   security find-generic-password -s "$key_name" >/dev/null 2>&1
 }
 
-# Remove outer quotes from a string (double or single)
-remove_outer_quotes() {
-  local value="$1"
-  if [[ "$value" =~ ^\".*\"$ ]]; then
-    value="${value#\"}"
-    value="${value%\"}"
-  elif [[ "$value" =~ ^\'.*\'$ ]]; then
-    value="${value#\'}"
-    value="${value%\'}"
+# Record one assignment, resolving a keychain:// reference
+add_env_value() {
+  local name="$1" value="$2" resolved
+  if [[ "$value" == keychain://* ]]; then
+    if resolved=$(read_secret "${value#keychain://}") && [ -n "$resolved" ]; then
+      value="$resolved"
+    else
+      info "Warning: $value not found in Keychain, keeping it as is"
+    fi
   fi
-  echo "$value"
+  PROCESSED_ENV_NAMES+=("$name")
+  PROCESSED_ENV_VALUES+=("$value")
 }
 
-
-# Process environment file and replace keychain:// references
-# This function safely parses .env files without using source/eval to prevent command injection
+# Parse an env file into PROCESSED_ENV_NAMES and PROCESSED_ENV_VALUES.
+# Values are only ever exported, never passed to source or eval.
 process_env_file() {
   local env_file="$1"
-  local allow_unsafe="${2:-false}"
-
-  # Reset processed environment arrays for this invocation
   PROCESSED_ENV_NAMES=()
   PROCESSED_ENV_VALUES=()
+  [ -f "$env_file" ] || return 0
 
-  if [ ! -f "$env_file" ]; then
-    return 0
-  fi
-
-  local var_name=""
-  local var_value=""
-  local in_multiline=false
-  local quote_char=""
-
+  local line var_name="" var_value="" quote_char=""
   while IFS= read -r line || [ -n "$line" ]; do
-    # If we're in a multiline value, append to existing value
-    if [ "$in_multiline" = true ]; then
-      # Check if this line closes the multiline value
+    line="${line%$'\r'}"
+
+    # Inside a multiline value: a line ending with the quote closes it
+    if [ -n "$quote_char" ]; then
       if [[ "$line" == *"$quote_char" ]]; then
-        # Append everything before the closing quote
-        local before_quote="${line%$quote_char*}"
-        if [ -n "$before_quote" ]; then
-          var_value+=$'\n'"$before_quote"
-        fi
-        in_multiline=false
-
-        # Check for keychain:// prefix
-        if [[ "$var_value" == keychain://* ]]; then
-          local label="${var_value#keychain://}"
-          local resolved_value
-          resolved_value=$(get_keychain_value "$label")
-          if [ -n "$resolved_value" ]; then
-            var_value="$resolved_value"
-          fi
-        fi
-
-        # Check for potentially dangerous characters unless --allow-unsafe is used
-        if [ "$allow_unsafe" = "false" ]; then
-          if [[ "$var_value" =~ [\$\`\\\;\|\&] ]] || [[ "$var_value" =~ \$\( ]]; then
-            info "Warning: Variable '$var_name' contains potentially dangerous characters, skipping" >&2
-            info "         Use --allow-unsafe flag if you trust the source and need these characters" >&2
-            var_name=""
-            var_value=""
-            continue
-          fi
-        fi
-
-        PROCESSED_ENV_NAMES+=("$var_name")
-        PROCESSED_ENV_VALUES+=("$var_value")
-        var_name=""
-        var_value=""
+        line="${line%"$quote_char"}"
+        [ -n "$line" ] && var_value+=$'\n'"$line"
+        quote_char=""
+        add_env_value "$var_name" "$var_value"
       else
-        # Continue accumulating multiline value
         var_value+=$'\n'"$line"
       fi
       continue
     fi
 
-    # Skip comments and empty lines (only when not in multiline)
-    case "$line" in
-      '#'*)
-        continue
-        ;;
-      '')
-        continue
+    case "$line" in '#'*|'') continue ;; esac
+    [[ "$line" == *"="* ]] || continue
+
+    var_name="${line%%=*}"
+    var_name="${var_name#export }"
+    var_value="${line#*=}"
+    [[ "$var_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+    case "$var_value" in
+      \"*|\'*)
+        quote_char="${var_value:0:1}"
+        var_value="${var_value:1}"
+        # No closing quote on this line: multiline value
+        [[ "$var_value" == *"$quote_char"* ]] || continue
+        # Keep up to the last quote; anything after it is a comment
+        var_value="${var_value%"$quote_char"*}"
+        quote_char=""
         ;;
     esac
-
-    # Check if line contains an assignment
-    if [[ "$line" == *"="* ]]; then
-      var_name="${line%%=*}"
-      var_value="${line#*=}"
-
-      # Validate variable name (must be valid shell identifier)
-      if ! [[ "$var_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-        continue
-      fi
-
-      # Check if value starts with a quote but doesn't end with matching quote (multiline)
-      if [[ "$var_value" =~ ^\"(.*)\"$ ]]; then
-        # Complete double-quoted value on one line - handle normally below
-        :
-      elif [[ "$var_value" =~ ^\" ]]; then
-        # Double-quoted multiline value (starts with " but doesn't end with ")
-        quote_char='"'
-        var_value="${var_value#\"}"
-        in_multiline=true
-        continue
-      elif [[ "$var_value" =~ ^\'(.*)\'$ ]]; then
-        # Complete single-quoted value on one line - handle normally below
-        :
-      elif [[ "$var_value" =~ ^\' ]]; then
-        # Single-quoted multiline value (starts with ' but doesn't end with ')
-        quote_char="'"
-        var_value="${var_value#\'}"
-        in_multiline=true
-        continue
-      fi
-
-      # Remove quotes if present (safely) for single-line values
-      var_value=$(remove_outer_quotes "$var_value")
-
-      # Check for keychain:// prefix
-      if [[ "$var_value" == keychain://* ]]; then
-        local label="${var_value#keychain://}"
-        local resolved_value
-        resolved_value=$(get_keychain_value "$label")
-        if [ -n "$resolved_value" ]; then
-          var_value="$resolved_value"
-        fi
-      fi
-
-      # Check for potentially dangerous characters unless --allow-unsafe is used
-      if [ "$allow_unsafe" = "false" ]; then
-        # Block command substitution and other dangerous patterns
-        # Using grep for complex pattern matching (more reliable for special chars)
-        if [[ "$var_value" =~ [\$\`\\\;\|\&] ]] || [[ "$var_value" =~ \$\( ]]; then
-          info "Warning: Variable '$var_name' contains potentially dangerous characters, skipping" >&2
-          info "         Use --allow-unsafe flag if you trust the source and need these characters" >&2
-          continue
-        fi
-      fi
-
-      PROCESSED_ENV_NAMES+=("$var_name")
-      PROCESSED_ENV_VALUES+=("$var_value")
-    fi
+    add_env_value "$var_name" "$var_value"
   done < "$env_file"
 }
 
@@ -439,14 +337,13 @@ discover_env_files() {
 # Parse ENV_FILES in order; a later file overrides an earlier one.
 # Sets MERGED_NAMES, MERGED_VALUES and MERGED_SOURCES.
 merge_env_files() {
-  local allow_unsafe="$1"
   MERGED_NAMES=()
   MERGED_VALUES=()
   MERGED_SOURCES=()
 
   local file idx j k name
   for file in ${ENV_FILES[@]+"${ENV_FILES[@]}"}; do
-    process_env_file "$file" "$allow_unsafe"
+    process_env_file "$file"
     for idx in "${!PROCESSED_ENV_NAMES[@]}"; do
       name="${PROCESSED_ENV_NAMES[$idx]}"
       j=${#MERGED_NAMES[@]}
@@ -493,7 +390,6 @@ print_merged_env() {
 # Function to use secrets from env file
 use_secrets() {
   local env_file=""
-  local allow_unsafe=false
   local show_values=false
   local args=()
 
@@ -501,14 +397,14 @@ use_secrets() {
   while [ $# -gt 0 ]; do
     case "$1" in
       -e|--env-file)
-        if [ -z "$2" ]; then
+        if [ -z "${2:-}" ]; then
           error_exit "-e/--env-file requires an argument"
         fi
         env_file="$2"
         shift 2
         ;;
       -u|--allow-unsafe)
-        allow_unsafe=true
+        # Kept so existing scripts still work; values are never evaluated, so nothing is blocked
         shift
         ;;
       -s|--show-values)
@@ -544,21 +440,6 @@ use_secrets() {
   if [ -z "$env_file" ]; then
     discover_env_files
   else
-    # Basic security validation for env-file path
-    # Only block access to known sensitive system directories
-    if [[ "$env_file" =~ ^/etc/passwd ]] || [[ "$env_file" =~ ^/etc/shadow ]] || \
-       [[ "$env_file" =~ ^/proc/ ]] || [[ "$env_file" =~ ^/sys/ ]] || \
-       [[ "$env_file" =~ ^/dev/ ]]; then
-      error_exit "Security error: Cannot use system files as env-file"
-    fi
-
-    # Optional verbose warning for paths outside current directory (can be disabled)
-    if [ "${KCM_VERBOSE:-}" = "1" ]; then
-      if [[ "$env_file" =~ ^\.\. ]] || [[ "$env_file" =~ ^/ ]]; then
-        info "Note: Using env-file outside current directory: $env_file" >&2
-      fi
-    fi
-
     if [ -f "$env_file" ]; then
       ENV_FILES=("$env_file")
     else
@@ -566,7 +447,7 @@ use_secrets() {
     fi
   fi
 
-  merge_env_files "$allow_unsafe"
+  merge_env_files
 
   # No command: list what would be loaded
   if [ ${#args[@]} -eq 0 ]; then
@@ -627,8 +508,8 @@ show_secret() {
   local value
 
   # Get the secret value
-  if value=$(security find-generic-password -s "$KEY_NAME" -w 2>/dev/null) && [ -n "$value" ]; then
-    echo "$value"
+  if value=$(read_secret "$KEY_NAME") && [ -n "$value" ]; then
+    printf '%s\n' "$value"
   else
     error_exit "Secret '$KEY_NAME' not found in Keychain"
   fi
@@ -652,19 +533,17 @@ copy_secret() {
   local value
 
   # Get the secret value
-  if value=$(security find-generic-password -s "$KEY_NAME" -w 2>/dev/null) && [ -n "$value" ]; then
-    echo -n "$value" | pbcopy
+  if value=$(read_secret "$KEY_NAME") && [ -n "$value" ]; then
+    printf '%s' "$value" | pbcopy
     success "Secret '$KEY_NAME' copied to clipboard"
     info "Clipboard will be cleared in 45 seconds for security"
 
-    # Clear clipboard after 45 seconds in background
-    # Close file descriptors to avoid blocking parent terminal
-    # Don't disown so we can kill it on interrupt
+    # Clear after 45 seconds, unless the user has copied something else since.
+    # Closed file descriptors keep the terminal from waiting on it.
     (
       sleep 45
-      echo -n "" | pbcopy
+      if [ "$(pbpaste)" = "$value" ]; then pbcopy </dev/null; fi
     ) </dev/null >/dev/null 2>&1 &
-    CLIPBOARD_CLEAR_PIDS+=("$!")
   else
     error_exit "Secret '$KEY_NAME' not found in Keychain"
   fi

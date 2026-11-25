@@ -17,9 +17,8 @@ We take security seriously. If you discover a vulnerability, please report it re
 ### For Users
 
 1. **Review untrusted .env files** before use
-2. **Use --allow-unsafe carefully** - only with trusted sources
-3. **Enable FileVault** and use a strong macOS password
-4. **Rotate secrets periodically**
+2. **Enable FileVault** and use a strong macOS password
+3. **Rotate secrets periodically**
 
 ### For Development
 
@@ -89,12 +88,10 @@ If you need more security:
 
 ## Security Features
 
-- Input validation (key names, variable names, values, paths)
-- Safe parsing without `eval` or `source`
-- Dangerous characters blocked by default (`$`, `` ` ``, `;`, `|`, `&`, `\`)
-- System files rejected (`/etc/passwd`, etc.)
-- Clipboard auto-clear (45 seconds, immediate on interruption)
-- Secure temporary files (`mktemp`)
+- Key and variable name validation
+- Safe parsing without `eval` or `source`: values are exported as plain strings, so `$`, `` ` `` or `;` in a value never runs anything
+- `kcm add` passes the secret to `security` on stdin, not as a command-line argument, so it stays out of `ps` and process audit logs (values over about 2 KB still go through the argument list)
+- Clipboard auto-clear after 45 seconds, unless you have copied something else since
 
 ## Security Checklist for Contributors
 
