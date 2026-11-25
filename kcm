@@ -220,21 +220,30 @@ add_secret() {
   fi
 }
 
-# Store a secret, creating or updating it in place.
+# Quote a string for a security -i command line.
+# security -i runs each line as a command, so newlines become spaces.
+security_quote() {
+  local s="${1//$'\n'/ }"
+  s="${s//\\/\\\\}"
+  printf '"%s"' "${s//\"/\\\"}"
+}
+
+# Store a secret, creating or updating it in place, with an optional COMMENT.
 # The value goes in as hex on stdin so it never shows in the process list.
+# Kind "kcm secret" and creator "kcm " mark kcm's entries; these attributes are not encrypted.
 store_secret() {
-  local name="$1" value="$2" account hex cmd
+  local name="$1" value="$2" comment="${3:-Added by kcm}" account hex cmd
   # -U only updates an entry whose account matches, so reuse the existing entry's account
   account=$(security find-generic-password -s "$name" 2>/dev/null | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p' | head -n 1)
   account="${account:-$USER}"
   hex=$(printf '%s' "$value" | xxd -p | tr -d '\n')
-  local quoted="${account//\\/\\\\}"
-  cmd="add-generic-password -U -s \"$name\" -a \"${quoted//\"/\\\"}\" -X $hex"
+  cmd="add-generic-password -U -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex"
   if [ ${#cmd} -lt 4000 ]; then
     printf '%s\n' "$cmd" | security -i >/dev/null 2>&1
   else
     # shortcut: security -i reads at most ~4 KB per line, so values over ~2 KB still go through argv
-    security add-generic-password -U -s "$name" -a "$account" -X "$hex" >/dev/null 2>&1 || return 1
+    security add-generic-password -U -s "$name" -a "$account" -D "kcm secret" -c "kcm " -j "$comment" \
+      -X "$hex" >/dev/null 2>&1 || return 1
   fi
   # security -i exits 0 even when the command fails, so read the value back
   [ "$(read_secret "$name" "$account")" = "$value" ]
@@ -991,11 +1000,14 @@ import_secrets() {
 
   # Store first; a line is only replaced once its value reads back from Keychain
   local -a done_items=()
+  local source_path
   for (( i=0; i<n; i++ )); do
     done_items[i]=false
     case "${actions[i]}" in
       store)
-        if store_secret "${labels[i]}" "${values[i]}"; then
+        source_path="$(cd "$(dirname "${files[i]}")" && pwd -P)/${files[i]##*/}"
+        case "$source_path" in "$HOME"/*) source_path="~${source_path#"$HOME"}" ;; esac
+        if store_secret "${labels[i]}" "${values[i]}" "Imported by kcm from $source_path"; then
           done_items[i]=true
         else
           info "Warning: could not store ${names[i]} from ${files[i]}, leaving it as is"

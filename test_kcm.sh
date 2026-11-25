@@ -35,7 +35,7 @@ cleanup() {
     security delete-generic-password -s "TEST_PATTERN_ONE" >/dev/null 2>&1 || true
     security delete-generic-password -s "TEST_PATTERN_TWO" >/dev/null 2>&1 || true
     security delete-generic-password -s "OTHER_PATTERN" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED; do
+    for suffix in API_KEY MULTI CLASH RENAMED INJECTED; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -141,6 +141,12 @@ echo "-----------------------------"
 # Test 3: Add secret
 echo "test123" | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1 && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "Add secret via stdin"
+
+# kcm marks its entries so they stand out in Keychain Access
+attrs=$(security find-generic-password -s "$TEST_KEY" 2>&1)
+assert_contains "$attrs" '"desc"<blob>="kcm secret"' "Added secret has kind 'kcm secret'"
+assert_contains "$attrs" '"crtr"<uint32>="kcm "' "Added secret has creator code 'kcm '"
+assert_contains "$attrs" '"icmt"<blob>="Added by kcm"' "Added secret has a comment"
 
 # Test 4: Show secret
 output=$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1) && exit_code=$? || exit_code=$?
@@ -502,6 +508,19 @@ EOF
 (cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
 assert_equals "sk-test-123" "$("$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" 2>&1)" "Import stores a detected secret"
 assert_equals "$(printf '# config\n%s="keychain://%s"\nPORT=3000' "${TEST_KEY}_API_KEY" "${TEST_KEY}_API_KEY")" "$(cat "$IMP/.env")" "Import replaces only the imported line"
+attrs=$(security find-generic-password -s "${TEST_KEY}_API_KEY" 2>&1)
+assert_contains "$attrs" "\"icmt\"<blob>=\"Imported by kcm from $(cd "$IMP" && pwd -P)/.env\"" "Imported secret's comment names its source file"
+assert_contains "$attrs" '"desc"<blob>="kcm secret"' "Imported secret has kind 'kcm secret'"
+
+# A newline in the source path must not start a second security -i command
+INJ="$TEST_DIR/inj"$'\n'"add-generic-password -s ${TEST_KEY}_INJECTED -a x -w y"$'\n'"z"
+mkdir -p "$INJ"
+"$SCRIPT_PATH" remove "${TEST_KEY}_API_KEY" >/dev/null 2>&1
+echo "${TEST_KEY}_API_KEY=sk-test-456" > "$INJ/.env"
+(cd "$INJ" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "sk-test-456" "$("$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" 2>&1)" "Import stores from a path with a newline"
+security find-generic-password -s "${TEST_KEY}_INJECTED" >/dev/null 2>&1 \
+  && fail "Newline in path runs no extra security command" || pass "Newline in path runs no extra security command"
 
 # A multiline quoted value is stored whole and its extra lines are removed
 cat > "$IMP/.env" << EOF

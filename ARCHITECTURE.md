@@ -34,6 +34,8 @@ All commands follow this pattern with appropriate validation at each step.
 
 Secrets are stored as generic password entries in the macOS login keychain using `security add-generic-password`. The service name is the environment variable name (e.g., `API_KEY`).
 
+Each entry kcm writes also gets kind `kcm secret`, creator code `kcm ` and a comment: `Added by kcm`, or `Imported by kcm from <file>` for `import`. Keychain stores these attributes unencrypted, so they hold no secret data.
+
 ### Environment Resolution
 
 The `use` command:

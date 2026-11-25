@@ -233,6 +233,8 @@ Parsing rules:
 
 Secrets stay in the macOS Keychain, which encrypts them. `kcm add` passes the value to `security` on stdin, so it doesn't show up in `ps` (values over about 2 KB are the exception). `.env` values are never run as code.
 
+In Keychain Access, kcm's entries show the kind "kcm secret". The comment says where a value came from: "Added by kcm", or "Imported by kcm from ~/Code/app/.env.local". These details are not encrypted, unlike the value. Entries from older versions of kcm get them the next time you add or import that name.
+
 **See [SECURITY.md](SECURITY.md) for full security policy, best practices, and limitations.**
 
 ## Examples
