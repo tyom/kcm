@@ -98,6 +98,38 @@ Without `--env-file`, `kcm use` searches from the current folder up to the git r
 
 `--env-file` loads exactly one file and skips the search.
 
+Variables already set in your environment win over env files, as with dotenv. kcm doesn't look them up in the Keychain, so `DATABASE_URL=postgres://localhost/test kcm use -- npm test` uses that URL without a Keychain prompt. This also means a script run through `kcm use` can call `kcm use` again without loading secrets twice.
+
+### Optional kcm in shared scripts
+
+To call kcm from committed scripts without making it a requirement, add a small wrapper to the repo:
+
+```bash
+kcm install-wrapper            # asks for the location, default scripts/with-env
+kcm install-wrapper bin/env    # or give it directly
+```
+
+The location is relative to the git root. kcm won't overwrite an existing file. The wrapper is a plain `sh` script, so it works without kcm:
+
+```sh
+#!/bin/sh
+command -v kcm >/dev/null 2>&1 && exec kcm use -- "$@"
+exec "$@"
+```
+
+Commit it and use it in scripts, for example in `package.json`:
+
+```json
+"scripts": {
+  "dev": "scripts/with-env vite"
+}
+```
+
+For this to work for everyone:
+
+- Keep `keychain://` references out of committed env files. Each person puts them in `.env.local` (gitignored). People without kcm put real values there instead.
+- Without kcm, the wrapper loads no env files. That's fine for tools that read `.env` themselves, such as Vite, Next.js, Node with dotenv or Docker Compose. A plain shell script that needs the values must load them in its fallback, for example with `set -a; . ./.env.local; set +a`. That runs the file as shell code, so it has to be valid shell.
+
 ### Inspecting what `use` loads
 
 Run `kcm use` without a command to list the variables it would load, with the file each one comes from. Values stay hidden:
@@ -219,6 +251,8 @@ kcm add API_KEY        # Enter their personal API key
 # Everyone can now run the app with their own credentials
 kcm use -- npm start
 ```
+
+To let teammates skip kcm and keep plain values in their `.env.local`, see [Optional kcm in shared scripts](#optional-kcm-in-shared-scripts).
 
 ## Requirements
 

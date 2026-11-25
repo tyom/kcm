@@ -39,8 +39,8 @@ Secrets are stored as generic password entries in the macOS login keychain using
 The `use` command:
 
 1. Parses `.env` files line-by-line (never using `eval`)
-2. Resolves `keychain://` references by querying the keychain
-3. Exports variables and executes the user command via `exec`
+2. Resolves `keychain://` references by querying the keychain, except for variables the caller already exported
+3. Exports variables not already in the environment and executes the user command via `exec`
 
 ## Security Architecture
 

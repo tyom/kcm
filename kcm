@@ -93,6 +93,7 @@ COMMANDS:
     from the current folder up to the git root and merges them. The closest folder wins,
     and within a folder the order is .env < .env.<mode> < .env.local < .env.<mode>.local.
     <mode> is \$NODE_ENV (default: development).
+    Variables already set in the environment win over env files.
 
     Options:
       -e, --env-file FILE   - Use only this env file (skips discovery)
@@ -109,6 +110,16 @@ COMMANDS:
       kcm use -e .env -- npm run dev
       kcm use --env-file ../.env -- make run-server
       kcm use -e .env -- echo \$DATABASE_URL
+
+  install-wrapper [PATH]
+    Add a script to the current git repo that runs a command through 'kcm use'
+    when kcm is installed, and runs it directly otherwise. Use it in committed
+    scripts so teammates without kcm can run them with plain .env values.
+    Without PATH, asks for the location (default: scripts/with-env).
+
+    Examples:
+      kcm install-wrapper
+      kcm install-wrapper bin/with-env
 
   help
     Show this help message
@@ -245,10 +256,16 @@ find_closing_quote() {
   return 1
 }
 
+# True if NAME was exported to kcm by the caller (set EXPORTED_NAMES first)
+is_exported() {
+  [[ "$EXPORTED_NAMES" == *$'\n'"$1"$'\n'* ]]
+}
+
 # Record one assignment, resolving a keychain:// reference
 add_env_value() {
   local name="$1" value="$2" resolved
-  if [[ "$value" == keychain://* ]]; then
+  # The environment wins, so skip the lookup and its Keychain prompt
+  if [[ "$value" == keychain://* ]] && ! is_exported "$name"; then
     if resolved=$(read_secret "${value#keychain://}") && [ -n "$resolved" ]; then
       value="$resolved"
     else
@@ -305,6 +322,17 @@ process_env_file() {
   done < "$env_file"
 }
 
+# Print the git root: the nearest folder with .git (a file in worktrees), from the physical cwd
+find_git_root() {
+  local root
+  root=$(pwd -P)
+  while [ "$root" != "/" ] && [ ! -e "$root/.git" ]; do
+    root="${root%/*}"; root="${root:-/}"
+  done
+  [ -e "$root/.git" ] || return 1
+  printf '%s\n' "$root"
+}
+
 # Find env files from the current directory up to the git root.
 # Within a folder: .env < .env.<mode> < .env.local < .env.<mode>.local.
 # Across folders: the closest folder wins.
@@ -319,13 +347,8 @@ discover_env_files() {
   # Physical path: relative paths like ../.env resolve from it, not from a symlinked $PWD
   local dir rel="./" name root
   dir=$(pwd -P)
-  root="$dir"
-
-  # Git root is the nearest folder with .git (a file in worktrees); without one, only check cwd
-  while [ "$root" != "/" ] && [ ! -e "$root/.git" ]; do
-    root="${root%/*}"; root="${root:-/}"
-  done
-  [ -e "$root/.git" ] || root="$dir"
+  # Without a git root, only check cwd
+  root=$(find_git_root) || root="$dir"
 
   while :; do
     for name in "${names[@]}"; do
@@ -370,6 +393,7 @@ merge_env_files() {
       MERGED_NAMES[j]="$name"
       MERGED_VALUES[j]="${PROCESSED_ENV_VALUES[$idx]}"
       MERGED_SOURCES[j]="$file"
+      if is_exported "$name"; then MERGED_SOURCES[j]="environment"; fi
     done
   done
 }
@@ -392,6 +416,8 @@ print_merged_env() {
       continue
     fi
     value="${MERGED_VALUES[$k]}"
+    # printenv adds one newline; the x keeps any newlines of the value itself
+    if is_exported "$name"; then value=$(printenv "$name"; echo x); value="${value%$'\nx'}"; fi
     if [ "$show_values" = masked ]; then
       # From 24 chars, first and last 4 reveal at most a third of the value
       if [ ${#value} -ge 24 ]; then
@@ -464,6 +490,8 @@ use_secrets() {
     fi
   fi
 
+  # Like dotenv, variables already in the environment are not overridden
+  EXPORTED_NAMES=$'\n'"$(compgen -e)"$'\n'
   merge_env_files
 
   # No command: list what would be loaded
@@ -479,11 +507,48 @@ use_secrets() {
 
   local k
   for k in "${!MERGED_NAMES[@]}"; do
+    if is_exported "${MERGED_NAMES[$k]}"; then continue; fi
     export "${MERGED_NAMES[$k]}=${MERGED_VALUES[$k]}"
   done
 
   # Execute the command with the processed environment
   exec "${args[@]}"
+}
+
+# Write a script that runs a command through kcm use when kcm is installed,
+# so committed scripts work for people without kcm
+install_wrapper() {
+  local default="scripts/with-env" path="${1:-}" root target
+  root=$(find_git_root) || error_exit "Not in a git repository"
+
+  if [ -z "$path" ]; then
+    # read prints the prompt only in a terminal; no answer means the default
+    read -r -p "Location relative to $root [$default]: " path || true
+    path="${path:-$default}"
+  fi
+  case "$path" in /*) error_exit "Location must be relative to the git root" ;; esac
+  target="$root/$path"
+
+  local script
+  script=$(cat << 'WRAPPER'
+#!/bin/sh
+# Resolve keychain:// secrets with kcm when it is installed, otherwise run the command as is.
+# See https://github.com/tyom/kcm
+command -v kcm >/dev/null 2>&1 && exec kcm use -- "$@"
+exec "$@"
+WRAPPER
+)
+
+  if [ -e "$target" ]; then
+    [ "$(cat "$target")" = "$script" ] || error_exit "$path already exists and is not the kcm wrapper"
+    info "$path is already installed"
+  else
+    mkdir -p "$(dirname "$target")"
+    printf '%s\n' "$script" > "$target"
+    success "Installed $path"
+  fi
+  chmod +x "$target"
+  info "Use it in scripts, e.g. \"dev\": \"$path vite\", and commit it"
 }
 
 # Function to remove secret from keychain
@@ -699,6 +764,10 @@ case "${1:-}" in
     shift
     use_secrets "$@"
     ;;
+  install-wrapper)
+    shift
+    install_wrapper "$@"
+    ;;
   version|--version|-v)
     echo "kcm version $VERSION"
     ;;
@@ -712,7 +781,7 @@ case "${1:-}" in
   *)
     echo -e "${RED}Error: Unknown command '$1'${NC}" >&2
     echo "" >&2
-    echo "Available commands: add, remove, show, copy, ls, use, version, help" >&2
+    echo "Available commands: add, remove, show, copy, ls, use, install-wrapper, version, help" >&2
     echo "Try '$SCRIPT_NAME help' for more information." >&2
     exit 1
     ;;
