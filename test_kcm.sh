@@ -123,6 +123,12 @@ assert_exit_code 0 "$exit_code" "Help command exits successfully"
 assert_contains "$output" "kcm - Keychain Master" "Help shows title"
 assert_contains "$output" "USAGE:" "Help shows usage"
 
+# Piped help stays plain text for scripts; in a terminal it is coloured
+output=$("$SCRIPT_PATH" help 2>&1)
+assert_not_contains "$output" $'\033' "Piped help has no colour codes"
+output=$(script -q /dev/null "$SCRIPT_PATH" help </dev/null 2>&1)
+assert_contains "$output" $'\033[1;97;100m add ' "Help in a terminal shows commands as chips"
+
 # Test 2: Version command
 output=$("$SCRIPT_PATH" version 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "Version command exits successfully"

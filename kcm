@@ -89,7 +89,7 @@ COMMANDS:
       kcm ls 'DATABASE*'   # List secrets starting with DATABASE
       kcm ls '*_KEY'       # List secrets ending with _KEY
 
-  use [options] [-- command [args...]]
+  use [options] [-- COMMAND [ARGS...]]
     Run a command with secrets from .env files resolved.
     Without a command, list the variables that would be loaded and their source file.
 
@@ -486,7 +486,7 @@ use_secrets() {
         shift
         ;;
       -h|--help)
-        show_command_help use
+        show_command_help use | colorize_help
         exit 0
         ;;
       --)
@@ -1200,6 +1200,56 @@ list_secrets() {
   fi
 }
 
+# Colour help text for a terminal: commands as bright white chips on grey, flags green,
+# arguments cyan, comments grey.
+# Piped help stays plain so scripts (and show_command_help) can parse it.
+colorize_help() {
+  if [ ! -t 1 ] || [ -n "${NO_COLOR:-}" ]; then
+    cat
+    return
+  fi
+  awk -v B=$'\033[1m' -v C=$'\033[1;97;100m' -v F=$'\033[32m' -v A=$'\033[36m' -v D=$'\033[90m' -v N=$'\033[0m' '
+    # Placeholders ([PATH], <command>, FILE) in cyan, flags (-e, --env-file, --) in green
+    function args(s) {
+      gsub(/[<[][A-Za-z][A-Za-z_.]*[]>]/, A "&" N, s)
+      gsub(/--?[a-z][a-z-]*/, F "&" N, s)
+      gsub(/ -- /, " " F "--" N " ", s)
+      gsub(/\[-- /, "[" F "--" N " ", s)
+      # Whole words only, so the OS in macOS stays plain
+      gsub(/(^| )[A-Z][A-Z_]+/, A "&" N, s)
+      return s
+    }
+    # Help for one command (kcm add -h) has no COMMANDS: heading
+    NR == 1 && !/^kcm - / { section = "COMMANDS:" }
+    /^kcm - / { print B $0 N; next }
+    /^[A-Z][A-Z ]*:$/ { section = $0; print B $0 N; next }
+    # Command headings: "  add KEY_NAME"; text after " - " is a description
+    /^  [a-z]/ {
+      match($0, /^  [^ ]+/)
+      rest = substr($0, RLENGTH + 1); desc = ""
+      if (i = index(rest, " - ")) { desc = substr(rest, i); rest = substr(rest, 1, i - 1) }
+      name = substr($0, 3, RLENGTH - 2)
+      # Only commands get a chip; its padding uses one leading space so the name keeps its column
+      if (section == "COMMANDS:") print " " C " " name " " N args(rest) desc
+      else print "  " B name N args(rest) desc
+      next
+    }
+    # Option lines: "      -e, --env-file FILE   - Use only this env file"
+    /^      [-A-Z]/ && index($0, " - ") {
+      i = index($0, " - ")
+      print args(substr($0, 1, i)) substr($0, i + 1)
+      next
+    }
+    # Example comments
+    /^      [a-z].*  # / {
+      i = index($0, "  # ")
+      print substr($0, 1, i + 1) D substr($0, i + 2) N
+      next
+    }
+    { print }
+  '
+}
+
 # Print one command's section of show_help (headings are the 2-space indented lines)
 show_command_help() {
   show_help | awk -v cmd="$1" '/^[^ ]/ { p = 0 } /^  [a-z]/ { p = ($1 == cmd) } p'
@@ -1216,7 +1266,7 @@ case "${2:-}" in
   -h|--help)
     # Commands with no help section fall through to the dispatcher
     cmd_help=$(show_command_help "$1")
-    if [ -n "$cmd_help" ]; then echo "$cmd_help"; exit 0; fi
+    if [ -n "$cmd_help" ]; then echo "$cmd_help" | colorize_help; exit 0; fi
     ;;
 esac
 
@@ -1258,10 +1308,10 @@ case "${1:-}" in
     echo "kcm version $_KCM_VERSION"
     ;;
   help|--help|-h)
-    show_help
+    show_help | colorize_help
     ;;
   "")
-    show_help
+    show_help | colorize_help
     exit 1
     ;;
   *)
