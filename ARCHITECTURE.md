@@ -97,7 +97,7 @@ Replaces the script process with the target command, ensuring:
 
 ### Import
 
-`import` parses env files directly (the parser never resolves references), so `keychain://` values stay as text, and uses the line range the parser records for each assignment. It stores every picked value with `store_secret` (which reads it back) before touching any file, then rewrites each file once through a temp file in the same folder and `mv`. A failed store leaves its line as it was. A file whose checksum changed since the scan is skipped, since its line ranges no longer hold. Any skipped store or rewrite makes `import` exit 1. A value the Keychain already holds is only referenced, so that entry keeps its old attributes. There is no backup file, because it would keep the plain values on disk.
+`import` parses env files directly (the parser never resolves references), so `keychain://` values stay as text, and uses the line range the parser records for each assignment. It stores every picked value with `store_secret` (which reads it back) before touching any file, then rewrites each file once through a temp file in the same folder and `mv`. A failed store leaves its line as it was. A file whose checksum changed since the scan is skipped, since its line ranges no longer hold. It is checked after the prompts and again just before `mv`. Any skipped store or rewrite makes `import` exit 1. A value the Keychain already holds is only referenced, so that entry keeps its old attributes. There is no backup file, because it would keep the plain values on disk.
 
 ### Environment Processing
 

@@ -779,9 +779,10 @@ pick_import_keys() {
 }
 
 # Rewrite FILE, replacing assignments given as "start:end:NAME=..." specs.
+# SUM is the file's cksum when the line ranges were read; a file that no longer matches is left alone.
 # Writes a temp file next to it and moves it over, so a failed write leaves the file intact.
 rewrite_env_file() {
-  local file="$1"; shift
+  local file="$1" sum="$2"; shift 2
   local tmp lineno=0 skip_to=0 line spec rest out
   tmp=$(mktemp "$(dirname "$file")/.kcm-import.XXXXXX") || return 1
   # The temp file holds the other lines in plain text, so remove it if kcm is interrupted
@@ -804,6 +805,12 @@ rewrite_env_file() {
   done < "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
   # shortcut: mv replaces a symlinked env file with a regular file; resolve links if that comes up
   # /usr/bin/stat: GNU stat from coreutils takes different flags. -L: the mode of the file read, not of a link
+  # Checked last, so an edit at any point since the scan (prompts, Keychain writes) is caught
+  if [ "$(cksum < "$file")" != "$sum" ]; then
+    rm -f "$tmp"
+    _KCM_IMPORT_TMP=""
+    return 2
+  fi
   chmod "$(/usr/bin/stat -L -f %Lp "$file")" "$tmp" && mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
   _KCM_IMPORT_TMP=""
 }
@@ -1075,7 +1082,7 @@ import_secrets() {
   done
 
   local -a specs
-  local imported=0 rotate=""
+  local imported=0 rotate="" status
   _KCM_IMPORT_TMP=""
   trap 'rm -f "${_KCM_IMPORT_TMP:-}"' EXIT
   trap 'exit 130' INT TERM
@@ -1084,12 +1091,18 @@ import_secrets() {
     for (( i=0; i<n; i++ )); do
       [ "${actions[i]}" != skip ] && [ "${files[i]}" = "$file" ] || continue
       specs+=("${lines[i]}:${names[i]}=\"keychain://${labels[i]}\"")
+      sum="${sums[i]}"
       [ "${tracked[i]}" = true ] && rotate="${rotate:+$rotate, }${names[i]}"
     done
     [ ${#specs[@]} -gt 0 ] || continue
-    if rewrite_env_file "$file" "${specs[@]}"; then
+    status=0
+    rewrite_env_file "$file" "$sum" "${specs[@]}" || status=$?
+    if [ "$status" -eq 0 ]; then
       imported=$((imported + ${#specs[@]}))
       success "Updated $file"
+    elif [ "$status" -eq 2 ]; then
+      info "Warning: $file changed during import, leaving it as is; its values are in Keychain, run import again"
+      failed=true
     else
       info "Warning: could not update $file; its values are in Keychain, replace them by hand"
       failed=true

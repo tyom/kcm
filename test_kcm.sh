@@ -36,7 +36,7 @@ cleanup() {
     security delete-generic-password -s "TEST_PATTERN_TWO" >/dev/null 2>&1 || true
     security delete-generic-password -s "OTHER_PATTERN" >/dev/null 2>&1 || true
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY; do
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -646,6 +646,22 @@ printf '%s_MOVED_KEY=sk-moved-1\n' "$TEST_KEY" > "$IMP/moved.env"
   | "$SCRIPT_PATH" import -e moved.env >/dev/null 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "$(printf 'PORT=3000\n%s_MOVED_KEY=sk-moved-1' "$TEST_KEY")" "$(cat "$IMP/moved.env")" "Import leaves a file changed during the prompts alone"
 assert_exit_code 1 "$exit_code" "Import exits 1 when a file changed during the prompts"
+
+# A file edited while kcm stores values is left alone: a security wrapper edits it mid-store
+MID="$TEST_DIR/mid"
+mkdir -p "$MID/bin"
+cat > "$MID/bin/security" << 'EOF'
+#!/bin/bash
+if [ "${1:-}" = -i ]; then
+  { printf 'PORT=3000\n'; cat "$MID_FILE"; } > "$MID_FILE.new" && mv "$MID_FILE.new" "$MID_FILE"
+fi
+exec /usr/bin/security "$@"
+EOF
+chmod +x "$MID/bin/security"
+printf '%s_MID_KEY=sk-mid-1\n' "$TEST_KEY" > "$MID/.env"
+(cd "$MID" && printf '\ny\n' | MID_FILE="$MID/.env" PATH="$MID/bin:$PATH" "$SCRIPT_PATH" import >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+assert_equals "$(printf 'PORT=3000\n%s_MID_KEY=sk-mid-1' "$TEST_KEY")" "$(cat "$MID/.env")" "Import leaves a file changed during the store alone"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a file changed during the store"
 
 # A kept Keychain value that changes during the prompts is not referenced
 echo "sk-ref-1" | "$SCRIPT_PATH" add "${TEST_KEY}_REF_KEY" - >/dev/null 2>&1
