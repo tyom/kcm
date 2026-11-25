@@ -41,7 +41,7 @@ Each entry kcm writes also gets kind `kcm secret`, creator code `kcm ` and a com
 The `use` command:
 
 1. Parses `.env` files line-by-line (never using `eval`)
-2. Resolves `keychain://` references by querying the keychain, except for variables the caller already exported
+2. Merges the files, then resolves `keychain://` references in the winning values by querying the keychain, except for variables the caller already exported
 3. Exports variables not already in the environment and executes the user command via `exec`
 
 ## Security Architecture
@@ -97,7 +97,7 @@ Replaces the script process with the target command, ensuring:
 
 ### Import
 
-`import` parses env files with `RESOLVE_REFS=false`, so `keychain://` values stay as text, and uses the line range the parser records for each assignment. It stores every picked value with `store_secret` (which reads it back) before touching any file, then rewrites each file once through a temp file in the same folder and `mv`. A failed store leaves its line as it was. There is no backup file, because it would keep the plain values on disk.
+`import` parses env files directly (the parser never resolves references), so `keychain://` values stay as text, and uses the line range the parser records for each assignment. It stores every picked value with `store_secret` (which reads it back) before touching any file, then rewrites each file once through a temp file in the same folder and `mv`. A failed store leaves its line as it was. There is no backup file, because it would keep the plain values on disk.
 
 ### Environment Processing
 

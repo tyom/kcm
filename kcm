@@ -22,8 +22,6 @@ declare -a _KCM_PROCESSED_ENV_NAMES=()
 declare -a _KCM_PROCESSED_ENV_VALUES=()
 # start:end line numbers of each assignment (end differs for multiline values)
 declare -a _KCM_PROCESSED_ENV_LINES=()
-# import sets this to false to read keychain:// references as plain text
-_KCM_RESOLVE_REFS=true
 
 # Helper functions
 error_exit() {
@@ -287,20 +285,11 @@ is_exported() {
   [[ "$_KCM_EXPORTED_NAMES" == *$'\n'"$1"$'\n'* ]]
 }
 
-# Record one assignment and its start:end lines, resolving a keychain:// reference
+# Record one assignment and its start:end lines
 add_env_value() {
-  local name="$1" value="$2" lines="$3" resolved
-  # The environment wins, so skip the lookup and its Keychain prompt
-  if [ "$_KCM_RESOLVE_REFS" = true ] && [[ "$value" == keychain://* ]] && ! is_exported "$name"; then
-    if resolved=$(read_secret "${value#keychain://}") && [ -n "$resolved" ]; then
-      value="$resolved"
-    else
-      info "Warning: $value not found in Keychain, keeping it as is"
-    fi
-  fi
-  _KCM_PROCESSED_ENV_NAMES+=("$name")
-  _KCM_PROCESSED_ENV_VALUES+=("$value")
-  _KCM_PROCESSED_ENV_LINES+=("$lines")
+  _KCM_PROCESSED_ENV_NAMES+=("$1")
+  _KCM_PROCESSED_ENV_VALUES+=("$2")
+  _KCM_PROCESSED_ENV_LINES+=("$3")
 }
 
 # Parse an env file into _KCM_PROCESSED_ENV_NAMES and _KCM_PROCESSED_ENV_VALUES.
@@ -404,14 +393,14 @@ discover_env_files() {
   done
 }
 
-# Parse _KCM_ENV_FILES in order; a later file overrides an earlier one.
-# Sets _KCM_MERGED_NAMES, _KCM_MERGED_VALUES and _KCM_MERGED_SOURCES.
+# Parse _KCM_ENV_FILES in order; a later file overrides an earlier one, the environment wins.
+# Resolves keychain:// only for the winning values. Sets _KCM_MERGED_NAMES, _KCM_MERGED_VALUES and _KCM_MERGED_SOURCES.
 merge_env_files() {
   _KCM_MERGED_NAMES=()
   _KCM_MERGED_VALUES=()
   _KCM_MERGED_SOURCES=()
 
-  local file idx j k name
+  local file idx j k name value
   for file in ${_KCM_ENV_FILES[@]+"${_KCM_ENV_FILES[@]}"}; do
     process_env_file "$file"
     for idx in "${!_KCM_PROCESSED_ENV_NAMES[@]}"; do
@@ -425,6 +414,17 @@ merge_env_files() {
       _KCM_MERGED_SOURCES[j]="$file"
       if is_exported "$name"; then _KCM_MERGED_SOURCES[j]="environment"; fi
     done
+  done
+
+  # Only now, so overridden references cost no lookup or Keychain prompt
+  for k in "${!_KCM_MERGED_NAMES[@]}"; do
+    value="${_KCM_MERGED_VALUES[$k]}"
+    [[ "$value" == keychain://* ]] && [ "${_KCM_MERGED_SOURCES[$k]}" != environment ] || continue
+    if value=$(read_secret "${value#keychain://}") && [ -n "$value" ]; then
+      _KCM_MERGED_VALUES[k]="$value"
+    else
+      info "Warning: ${_KCM_MERGED_VALUES[$k]} not found in Keychain, keeping it as is"
+    fi
   done
 }
 
@@ -587,12 +587,14 @@ WRAPPER
 
 # Print why a value looks like a secret ("name has KEY, starts with sk-"), or nothing
 secret_reason() {
-  local name="$1" value="$2" upper reasons="" word prefix
-  upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
-  # Longer words first, so DB_PASSWORD reports PASSWORD rather than PASS
+  local name="$1" value="$2" reasons="" word prefix
+  # Longer words first, so DB_PASSWORD reports PASSWORD rather than PASS.
+  # nocasematch instead of upper-casing: bash 3.2 has no ${name^^}
+  shopt -s nocasematch
   for word in PASSWORD CREDENTIAL PRIVATE SECRET TOKEN SALT AUTH PASS PWD DSN KEY; do
-    if [[ "$upper" == *"$word"* ]]; then reasons="name has $word"; break; fi
+    if [[ "$name" == *"$word"* ]]; then reasons="name has $word"; break; fi
   done
+  shopt -u nocasematch
   local url_re='^[A-Za-z][A-Za-z0-9+.-]*://[^/:@]+:[^/@]+@'
   local kind=""
   case "$value" in
@@ -720,12 +722,12 @@ pick_import_keys() {
         # The row's own tint is dropped here, as green or yellow would not read on grey.
         printf '\033[48;5;250;38;5;234m> %s\033[0m\n' "$line" >&2
       else
-        printf '%b  %s\033[0m\n' "${tints[i]}" "$line" >&2
+        printf '%b  %s%b\n' "${tints[i]}" "$line" "$_KCM_NC" >&2
       fi
     done
     status="↑/↓ move  space toggle  a all  enter continue  q quit"
     [ "$total" -gt "$height" ] && status="$status  ($((top + 1))-$((top + height)) of $total)"
-    printf '\033[90m%s\033[0m\n' "${status:0:term_cols-1}" >&2
+    printf '%b%s%b\n' "$_KCM_GREY" "${status:0:term_cols-1}" "$_KCM_NC" >&2
     drawn=$((height + 2))
 
     IFS= read -rsn1 key || abort_import
@@ -820,9 +822,9 @@ import_secrets() {
   printf -v list '%s, ' "${_KCM_ENV_FILES[@]}"
   info "Scanning ${list%, }"
 
-  # Read keychain:// references as text; those values are already imported
-  _KCM_RESOLVE_REFS=false
   local -a names=() values=() files=() lines=() whys=() picked=() tracked=() tints=()
+  # Default Keychain label per row and what the scan found there: "", readable or unreadable
+  local -a labels=() kc_states=() kc_values=()
   # Lines that already hold a keychain:// reference, shown after the others
   local -a ref_names=() ref_files=() ref_whys=() ref_marks=() ref_tints=()
   local file idx value why state tick tint is_tracked label existing n=0 m=0 in_keychain
@@ -858,8 +860,11 @@ import_secrets() {
       esac
       label="${_KCM_PROCESSED_ENV_NAMES[$idx]}"
       while [[ "$label" == _* ]]; do label="${label#_}"; done
+      labels[n]="$label"; kc_states[n]=""; kc_values[n]=""
       if [[ "$in_keychain" == *$'\n'"$label"$'\n'* ]]; then
-        if ! existing=$(read_secret "$label"); then
+        if existing=$(read_secret "$label"); then kc_states[n]=readable; kc_values[n]="$existing"
+        else kc_states[n]=unreadable; fi
+        if [ "${kc_states[n]}" = unreadable ]; then
           state="${state:+$state, }in Keychain, unreadable"; tint="$_KCM_YELLOW"
         elif [ "$existing" = "$value" ]; then
           # Only the reference is written, nothing new is stored
@@ -926,14 +931,13 @@ import_secrets() {
 
   # Choose a Keychain label for each picked value. action: store, ref (already there) or skip
   local repo label existing found answer j clash_with shown
-  local -a labels=() actions=()
+  local -a actions=()
   repo=$(find_git_root 2>/dev/null || pwd -P)
   repo=$(printf '%s' "${repo##*/}" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')
   for (( i=0; i<n; i++ )); do
     actions[i]=skip
     [ "${picked[i]}" = true ] || continue
-    label="${names[i]}"
-    while [[ "$label" == _* ]]; do label="${label#_}"; done
+    label="${labels[i]}"
     while :; do
       if ! [[ "$label" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]]; then
         info "'$label' can't be a Keychain name: use a letter first, then letters, numbers and underscores"
@@ -948,7 +952,11 @@ import_secrets() {
           found=true; existing="${values[j]}"; clash_with="picked from ${files[j]}"
         fi
       done
-      if [ "$found" = false ]; then
+      # The scan already read the default label: don't read it (or prompt) again
+      if [ "$found" = false ] && [ "$label" = "${labels[i]}" ] && [ -n "${kc_states[i]}" ]; then
+        found=true; existing="${kc_values[i]}"
+        [ "${kc_states[i]}" = unreadable ] && shown="unreadable"
+      elif [ "$found" = false ]; then
         if existing=$(read_secret "$label"); then
           found=true
         elif keychain_entry_exists "$label"; then
@@ -977,42 +985,34 @@ import_secrets() {
   done
 
   # Summary and confirmation
-  local stores=0 refs=0 file_count=0
+  local stores=0
   local -a touched=()
   echo "" >&2
   for (( i=0; i<n; i++ )); do
     case "${actions[i]}" in
       store) stores=$((stores + 1)); echo "  ${names[i]} (${files[i]}) → keychain://${labels[i]}" >&2 ;;
-      ref) refs=$((refs + 1)); echo "  ${names[i]} (${files[i]}) → keychain://${labels[i]} (already in Keychain)" >&2 ;;
+      ref) echo "  ${names[i]} (${files[i]}) → keychain://${labels[i]} (already in Keychain)" >&2 ;;
       *) continue ;;
     esac
     case " ${touched[*]+${touched[*]}} " in *" ${files[i]} "*) ;; *) touched+=("${files[i]}") ;; esac
   done
-  if [ $((stores + refs)) -eq 0 ]; then
+  if [ ${#touched[@]} -eq 0 ]; then
     info "Nothing to import"
     return 0
   fi
-  file_count=${#touched[@]}
-  IFS= read -r -p "Store $stores secret(s) and update $file_count file(s)? [y/N] " answer || abort_import
+  IFS= read -r -p "Store $stores secret(s) and update ${#touched[@]} file(s)? [y/N] " answer || abort_import
   case "$answer" in y|Y|yes|YES) ;; *) abort_import ;; esac
 
   # Store first; a line is only replaced once its value reads back from Keychain
-  local -a done_items=()
   local source_path
   for (( i=0; i<n; i++ )); do
-    done_items[i]=false
-    case "${actions[i]}" in
-      store)
-        source_path="$(cd "$(dirname "${files[i]}")" && pwd -P)/${files[i]##*/}"
-        case "$source_path" in "$HOME"/*) source_path="~${source_path#"$HOME"}" ;; esac
-        if store_secret "${labels[i]}" "${values[i]}" "Imported by kcm from $source_path"; then
-          done_items[i]=true
-        else
-          info "Warning: could not store ${names[i]} from ${files[i]}, leaving it as is"
-        fi
-        ;;
-      ref) done_items[i]=true ;;
-    esac
+    [ "${actions[i]}" = store ] || continue
+    source_path="$(cd "$(dirname "${files[i]}")" && pwd -P)/${files[i]##*/}"
+    case "$source_path" in "$HOME"/*) source_path="~${source_path#"$HOME"}" ;; esac
+    if ! store_secret "${labels[i]}" "${values[i]}" "Imported by kcm from $source_path"; then
+      info "Warning: could not store ${names[i]} from ${files[i]}, leaving it as is"
+      actions[i]=skip
+    fi
   done
 
   local -a specs
@@ -1023,7 +1023,7 @@ import_secrets() {
   for file in "${touched[@]}"; do
     specs=()
     for (( i=0; i<n; i++ )); do
-      [ "${done_items[i]}" = true ] && [ "${files[i]}" = "$file" ] || continue
+      [ "${actions[i]}" != skip ] && [ "${files[i]}" = "$file" ] || continue
       specs+=("${lines[i]}:${names[i]}=\"keychain://${labels[i]}\"")
       [ "${tracked[i]}" = true ] && rotate="${rotate:+$rotate, }${names[i]}"
     done

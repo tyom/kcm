@@ -97,6 +97,11 @@ assert_not_contains() {
     fi
 }
 
+# Drop colour and cursor escape codes, and the carriage returns a pty adds
+strip_ansi() {
+    sed $'s/\033\\[[0-9;?]*[A-Za-z]//g' | tr -d '\r'
+}
+
 assert_exit_code() {
     local expected="$1"
     local actual="$2"
@@ -161,7 +166,7 @@ assert_contains "$output" "$TEST_KEY" "List shows test key"
 # ls shows kcm's entries, then untagged ones from older kcm versions, and hides other apps' entries
 security add-generic-password -s "${TEST_KEY}_LEGACY" -a "$USER" -w old >/dev/null 2>&1
 security add-generic-password -s "${TEST_KEY}_OTHER_APP" -a "some-app" -w x >/dev/null 2>&1
-output=$("$SCRIPT_PATH" ls "${TEST_KEY}*" 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+output=$("$SCRIPT_PATH" ls "${TEST_KEY}*" 2>&1 | strip_ansi)
 kcm_part="${output%%older kcm*}"
 legacy_part="${output#*older kcm}"
 assert_contains "$kcm_part" "• $TEST_KEY"$'\n' "List shows kcm entries first"
@@ -611,7 +616,7 @@ ${TEST_KEY}_CLASH=new
 DONE_REF=keychain://${TEST_KEY}_API_KEY
 BROKEN_REF=keychain://${TEST_KEY}_MISSING
 EOF
-output=$(cd "$IMP" && printf '\n' | "$SCRIPT_PATH" import 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+output=$(cd "$IMP" && printf '\n' | "$SCRIPT_PATH" import 2>&1 | strip_ansi)
 assert_contains "$output" "${TEST_KEY}_API_KEY  ./.env  ****       name has KEY · in Keychain, same value" "Import marks a name in Keychain with the same value"
 assert_contains "$output" "${TEST_KEY}_CLASH    ./.env  ****       name has KEY · in Keychain, different value" "Import marks a name in Keychain with another value"
 assert_contains "$(grep DONE_REF <<< "$output")" "✓" "Import shows an existing reference as done"
@@ -619,7 +624,7 @@ assert_contains "$(grep BROKEN_REF <<< "$output")" "missing from Keychain" "Impo
 
 # In the key-driven list, the NAME heading starts in the same column as the names
 printf 'LONG_NAME_FOR_ALIGN=plain\n' > "$IMP/.env"
-output=$(cd "$IMP" && printf 'q' | script -q /dev/null "$SCRIPT_PATH" import 2>&1 | sed $'s/\033\\[[0-9;?]*[A-Za-z]//g' | tr -d '\r')
+output=$(cd "$IMP" && printf 'q' | script -q /dev/null "$SCRIPT_PATH" import 2>&1 | strip_ansi)
 header=$(grep -m1 'NAME' <<< "$output"); row=$(grep -m1 'LONG_NAME_FOR_ALIGN' <<< "$output")
 header="${header%%NAME*}"; row="${row%%LONG_NAME_FOR_ALIGN*}"
 assert_equals "${#header}" "${#row}" "Import list headings line up with the columns"
