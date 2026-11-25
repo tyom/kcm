@@ -328,9 +328,12 @@ assert_exit_code 0 "$exit_code" "No command lists variables"
 assert_equals "$(printf 'ROOT_ONLY ../../.env\nSHARED ./.env.local\nWEB_ONLY ./.env.local')" "$(echo "$output" | tr -s ' ')" "Lists names with winning file"
 assert_not_contains "$output" "root" "Listing hides values"
 
-# Test: --show-values prints merged values when piped
-output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use --show-values 2>/dev/null | cat)
-assert_equals "$(printf 'ROOT_ONLY=root\nSHARED=web\nWEB_ONLY=web')" "$output" "Show values prints merged values"
+# Test: --show-values masks values; --full shows them when piped
+printf 'LONG_SECRET=sk-abcdefgh12349f2c\nSHORT=short\n' > "$TEST_DIR/mask.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>/dev/null)
+assert_equals "$(printf 'LONG_SECRET=sk-a…9f2c\nSHORT=****')" "$output" "Show values masks values"
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use --full 2>/dev/null | cat)
+assert_equals "$(printf 'ROOT_ONLY=root\nSHARED=web\nWEB_ONLY=web')" "$output" "--full prints merged values"
 
 # Test: --env-file with no command lists that file only
 output=$("$SCRIPT_PATH" use -e "$MONO/.env" 2>/dev/null | tr -s ' ')

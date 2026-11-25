@@ -107,7 +107,9 @@ API_KEY       ./.env.local
 DATABASE_URL  ../../.env
 ```
 
-Add `--show-values` (`-s`) to see the resolved values. They open in `less`, which clears the screen when you quit, so secrets don't stay in your terminal scrollback. When piped (`kcm use -s | grep DB`), it prints plain `NAME=value` lines.
+Add `--show-values` (`-s`) to check the resolved values without exposing them. Values of 12 characters or more show the first and last 4 (`API_KEY=sk-a…9f2c`), and shorter ones show `****`.
+
+`--full` shows complete values. In a terminal they open in `less`, which clears the screen when you quit, so secrets don't stay in your scrollback. When piped (`kcm use --full | grep DB`), it prints plain `NAME=value` lines. To get a single value, use `kcm show NAME` or `kcm copy NAME`.
 
 ### Managing Secrets
 

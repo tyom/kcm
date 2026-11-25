@@ -124,14 +124,16 @@ COMMANDS:
 
     Options:
       -e, --env-file FILE   - Use only this env file (skips discovery)
-      -s, --show-values     - Without a command, show values too (opens in less so they stay
+      -s, --show-values     - Without a command, show masked values (first and last 4 chars)
+      --full                - Without a command, show full values (opens in less so they stay
                               out of terminal scrollback; prints plain text when piped)
       -u, --allow-unsafe    - Allow special characters in env values that are normally blocked
                               for security (use with caution, only with trusted sources)
 
     Examples:
       kcm use              # list variable names and where they come from
-      kcm use -s           # inspect values in a pager
+      kcm use -s           # check values, masked
+      kcm use --full       # inspect full values in a pager
       kcm use -- npm run dev
       NODE_ENV=production kcm use -- node server.js
       kcm use -e .env -- npm run dev
@@ -453,10 +455,11 @@ merge_env_files() {
   done
 }
 
-# Print merged variables sorted by name: name and source file, or NAME=value
+# Print merged variables sorted by name.
+# show_values: false (name and source file), masked or full (NAME=value)
 print_merged_env() {
   local show_values="$1"
-  local width=0 name k
+  local width=0 name k value
   for name in ${MERGED_NAMES[@]+"${MERGED_NAMES[@]}"}; do
     [ "${#name}" -gt "$width" ] && width=${#name}
   done
@@ -465,11 +468,20 @@ print_merged_env() {
   for name in $(printf '%s\n' ${MERGED_NAMES[@]+"${MERGED_NAMES[@]}"} | sort); do
     for k in "${!MERGED_NAMES[@]}"; do
       [ "${MERGED_NAMES[$k]}" = "$name" ] || continue
-      if [ "$show_values" = true ]; then
-        printf '%s=%s\n' "$name" "${MERGED_VALUES[$k]}"
-      else
+      if [ "$show_values" = false ]; then
         printf '%-*s  %s\n' "$width" "$name" "${MERGED_SOURCES[$k]}"
+        continue
       fi
+      value="${MERGED_VALUES[$k]}"
+      if [ "$show_values" = masked ]; then
+        # Under 12 chars, first and last 4 would reveal most of the value
+        if [ ${#value} -ge 12 ]; then
+          value="${value:0:4}…${value: -4}"
+        elif [ -n "$value" ]; then
+          value="****"
+        fi
+      fi
+      printf '%s=%s\n' "$name" "$value"
     done
   done
 }
@@ -496,7 +508,11 @@ use_secrets() {
         shift
         ;;
       -s|--show-values)
-        show_values=true
+        show_values=masked
+        shift
+        ;;
+      --full)
+        show_values=full
         shift
         ;;
       --)
@@ -546,9 +562,9 @@ use_secrets() {
 
   # No command: list what would be loaded
   if [ ${#args[@]} -eq 0 ]; then
-    if [ "$show_values" = true ] && [ -t 1 ]; then
+    if [ "$show_values" = full ] && [ -t 1 ]; then
       # less keeps secrets off the scrollback: -+F -+X force its separate screen even if $LESS disables it
-      print_merged_env true | less -+F -+X || true
+      print_merged_env full | less -+F -+X || true
     else
       print_merged_env "$show_values"
     fi
