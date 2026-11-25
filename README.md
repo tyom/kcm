@@ -90,7 +90,7 @@ Names already in the Keychain stand out. Green means the Keychain has the same v
 
 Use ↑/↓ (or `j`/`k`) to move, Space to tick or untick, `a` to tick all (or untick all when everything is ticked) and Enter to continue. Long lists scroll. When input isn't a terminal, for example piped from a script, kcm prints a numbered list instead and reads numbers or ranges such as `3` or `1-2`.
 
-- Each value is stored under its variable name. If that name is already in the Keychain with a different value, kcm asks whether to overwrite it, keep the Keychain value, store under another name (default `<REPO>_<NAME>`) or skip.
+- Each value is stored under its variable name, without leading underscores (`_TOKEN` is stored as `TOKEN`). If that name is already in the Keychain with a different value, kcm asks whether to overwrite it, keep the Keychain value, store under another name (default `<REPO>_<NAME>`) or skip.
 - Files tracked by git and names with a public prefix (`NEXT_PUBLIC_`, `VITE_` and similar) are never ticked for you. If you import from a tracked file, rotate the secret: the old value stays in git history.
 - After a final confirmation, kcm stores each value, reads it back, and only then replaces its line with `NAME="keychain://LABEL"`. A comment after the value goes with it. Other lines stay as they are. kcm keeps no backup, since it would hold the plain values.
 - Without `-e`, every `.env` and `.env.*` file is scanned, not only the current `NODE_ENV`. Files ending in `.example`, `.sample` or `.template` are skipped.
@@ -233,7 +233,7 @@ Parsing rules:
 
 Secrets stay in the macOS Keychain, which encrypts them. `kcm add` passes the value to `security` on stdin, so it doesn't show up in `ps` (values over about 2 KB are the exception). `.env` values are never run as code.
 
-In Keychain Access, kcm's entries show the kind "kcm secret". The comment says where a value came from: "Added by kcm", or "Imported by kcm from ~/Code/app/.env.local". These details are not encrypted, unlike the value. Entries from older versions of kcm get them the next time you add or import that name.
+In Keychain Access, kcm's entries show the kind "kcm secret". The comment says where a value came from: "Added by kcm", or "Imported by kcm from ~/Code/app/.env.local". These details are not encrypted, unlike the value. Entries from older versions of kcm get them the next time you add that name, or import a different value under it. An import that finds the same value only writes the reference and leaves the entry as it is.
 
 **See [SECURITY.md](SECURITY.md) for full security policy, best practices, and limitations.**
 

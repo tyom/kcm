@@ -35,7 +35,8 @@ cleanup() {
     security delete-generic-password -s "TEST_PATTERN_ONE" >/dev/null 2>&1 || true
     security delete-generic-password -s "TEST_PATTERN_TWO" >/dev/null 2>&1 || true
     security delete-generic-password -s "OTHER_PATTERN" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED; do
+    security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -131,7 +132,7 @@ assert_contains "$output" "USAGE:" "Help shows usage"
 # Piped help stays plain text for scripts; in a terminal it is coloured
 output=$("$SCRIPT_PATH" help 2>&1)
 assert_not_contains "$output" $'\033' "Piped help has no colour codes"
-output=$(script -q /dev/null "$SCRIPT_PATH" help </dev/null 2>&1)
+output=$(NO_COLOR='' script -q /dev/null "$SCRIPT_PATH" help </dev/null 2>&1)
 assert_contains "$output" $'\033[1;97;100m add ' "Help in a terminal shows commands as chips"
 
 # Test 2: Version command
@@ -248,6 +249,11 @@ echo "keychain_secret" | "$SCRIPT_PATH" add "${TEST_KEY}_QUOTE" - >/dev/null 2>&
 cat >> "$TEST_ENV" << EOF
 KEYCHAIN_VAR=keychain://${TEST_KEY}_QUOTE
 EOF
+
+# A file named "environment" is a file like any other, not the exported-variable marker
+printf 'FROM_FILE=keychain://%s_QUOTE\n' "$TEST_KEY" > "$TEST_DIR/environment"
+output=$(cd "$TEST_DIR" && "$SCRIPT_PATH" use -e environment -- printenv FROM_FILE 2>&1)
+assert_equals "keychain_secret" "$output" "Resolves references from a file named environment"
 
 # Test 13: Use command with env file
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$SIMPLE_VAR"' 2>&1) && exit_code=$? || exit_code=$?
@@ -599,6 +605,40 @@ assert_equals "local-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" 2>&1)" 
 assert_equals "shared-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_RENAMED" 2>&1)" "Import stores the clashing .env value under the new name"
 assert_equals "${TEST_KEY}_API_KEY=\"keychain://${TEST_KEY}_RENAMED\"" "$(cat "$IG/.env")" "Import points .env at the renamed entry"
 
+# A symlinked env file keeps its target's permissions when rewritten
+printf '%s_LINK_KEY=sk-link-1\n' "$TEST_KEY" > "$IMP/real.env"
+chmod 600 "$IMP/real.env"
+ln -s real.env "$IMP/link.env"
+(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import -e link.env >/dev/null 2>&1)
+assert_equals "600" "$(/usr/bin/stat -f %Lp "$IMP/link.env")" "Import keeps a symlinked file's permissions"
+
+# A value ending in a newline still reads back, so its line is replaced
+printf '%s_NL_KEY="abc\n\n"\n' "$TEST_KEY" > "$IMP/nl.env"
+(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import -e nl.env >/dev/null 2>&1)
+assert_equals "${TEST_KEY}_NL_KEY=\"keychain://${TEST_KEY}_NL_KEY\"" "$(cat "$IMP/nl.env")" "Import replaces a value with a trailing newline"
+
+# A public name stays unticked even when Keychain has the same value
+echo "pk-same" | "$SCRIPT_PATH" add "NEXT_PUBLIC_${TEST_KEY}_KEY" - >/dev/null 2>&1
+printf 'NEXT_PUBLIC_%s_KEY=pk-same\n' "$TEST_KEY" > "$IMP/pub.env"
+output=$(cd "$IMP" && printf '\n' | "$SCRIPT_PATH" import -e pub.env 2>&1)
+assert_contains "$output" "[ ]  1  NEXT_PUBLIC_${TEST_KEY}_KEY" "Import leaves a public name unticked when Keychain has its value"
+
+# A file edited while kcm asks is left alone
+printf '%s_MOVED_KEY=sk-moved-1\n' "$TEST_KEY" > "$IMP/moved.env"
+(cd "$IMP" && { printf '\n'; sleep 2; printf 'PORT=3000\n%s_MOVED_KEY=sk-moved-1\n' "$TEST_KEY" > moved.env; printf 'y\n'; } \
+  | "$SCRIPT_PATH" import -e moved.env >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+assert_equals "$(printf 'PORT=3000\n%s_MOVED_KEY=sk-moved-1' "$TEST_KEY")" "$(cat "$IMP/moved.env")" "Import leaves a file changed during the prompts alone"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a file changed during the prompts"
+
+# A file kcm can't rewrite makes import fail
+RO="$TEST_DIR/readonly"
+mkdir -p "$RO"
+printf '%s_RO_KEY=sk-ro-1\n' "$TEST_KEY" > "$RO/.env"
+chmod 555 "$RO"
+(cd "$RO" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+chmod 755 "$RO"
+assert_exit_code 1 "$exit_code" "Import exits 1 when a file can't be rewritten"
+
 # In a terminal: space toggles, the down arrow moves, Enter accepts.
 # script runs kcm on a pseudo-terminal so it uses the key-driven list.
 "$SCRIPT_PATH" remove "${TEST_KEY}_API_KEY" >/dev/null 2>&1
@@ -626,6 +666,7 @@ assert_contains "$(grep BROKEN_REF <<< "$output")" "missing from Keychain" "Impo
 printf 'LONG_NAME_FOR_ALIGN=plain\n' > "$IMP/.env"
 output=$(cd "$IMP" && printf 'q' | script -q /dev/null "$SCRIPT_PATH" import 2>&1 | strip_ansi)
 header=$(grep -m1 'NAME' <<< "$output"); row=$(grep -m1 'LONG_NAME_FOR_ALIGN' <<< "$output")
+[ -n "$header" ] && [ -n "$row" ] && pass "Import list draws the heading and row" || fail "Import list draws the heading and row"
 header="${header%%NAME*}"; row="${row%%LONG_NAME_FOR_ALIGN*}"
 assert_equals "${#header}" "${#row}" "Import list headings line up with the columns"
 

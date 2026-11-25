@@ -228,7 +228,7 @@ security_quote() {
 # The value goes in as hex on stdin so it never shows in the process list.
 # Kind "kcm secret" and creator "kcm " mark kcm's entries; these attributes are not encrypted.
 store_secret() {
-  local name="$1" value="$2" comment="${3:-Added by kcm}" account hex cmd
+  local name="$1" value="$2" comment="${3:-Added by kcm}" account hex cmd got
   # -U only updates an entry whose account matches, so reuse the existing entry's account
   account=$(security find-generic-password -s "$name" 2>/dev/null | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p' | head -n 1)
   account="${account:-$USER}"
@@ -241,8 +241,10 @@ store_secret() {
     security add-generic-password -U -s "$name" -a "$account" -D "kcm secret" -c "kcm " -j "$comment" \
       -X "$hex" >/dev/null 2>&1 || return 1
   fi
-  # security -i exits 0 even when the command fails, so read the value back
-  [ "$(read_secret "$name" "$account")" = "$value" ]
+  # security -i exits 0 even when the command fails, so read the value back.
+  # The x keeps trailing newlines that $(...) would strip.
+  got=$(read_secret "$name" "$account" && printf x) || return 1
+  [ "$got" = "${value}x" ]
 }
 
 # Print a secret's value.
@@ -419,7 +421,7 @@ merge_env_files() {
   # Only now, so overridden references cost no lookup or Keychain prompt
   for k in "${!_KCM_MERGED_NAMES[@]}"; do
     value="${_KCM_MERGED_VALUES[$k]}"
-    [[ "$value" == keychain://* ]] && [ "${_KCM_MERGED_SOURCES[$k]}" != environment ] || continue
+    [[ "$value" == keychain://* ]] && ! is_exported "${_KCM_MERGED_NAMES[$k]}" || continue
     if value=$(read_secret "${value#keychain://}") && [ -n "$value" ]; then
       _KCM_MERGED_VALUES[k]="$value"
     else
@@ -677,8 +679,9 @@ pick_import_numbers() {
         info "Ignoring '$tok'"
         continue
       fi
+      [ "$a" -lt 1 ] && a=1
+      [ "$b" -gt "$n" ] && b=$n
       for (( i=a; i<=b; i++ )); do
-        [ "$i" -ge 1 ] && [ "$i" -le "$n" ] || continue
         if [ "${picked[i-1]}" = true ]; then picked[i-1]=false; else picked[i-1]=true; fi
       done
     done
@@ -704,6 +707,8 @@ pick_import_keys() {
     [ "$height" -gt "$total" ] && height=$total
     [ "$cur" -lt "$top" ] && top=$cur
     [ "$cur" -ge $((top + height)) ] && top=$((cur - height + 1))
+    # The screen may have grown since the last draw
+    [ $((top + height)) -gt "$total" ] && top=$((total - height))
 
     # Back to the top of the last draw and clear below it
     [ "$drawn" -gt 0 ] && printf '\033[%dA\033[J' "$drawn" >&2
@@ -787,8 +792,8 @@ rewrite_env_file() {
     printf '%s\n' "$out"
   done < "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
   # shortcut: mv replaces a symlinked env file with a regular file; resolve links if that comes up
-  # /usr/bin/stat: GNU stat from coreutils takes different flags
-  chmod "$(/usr/bin/stat -f %Lp "$file")" "$tmp" && mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  # /usr/bin/stat: GNU stat from coreutils takes different flags. -L: the mode of the file read, not of a link
+  chmod "$(/usr/bin/stat -L -f %Lp "$file")" "$tmp" && mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
   _KCM_IMPORT_TMP=""
 }
 
@@ -822,17 +827,19 @@ import_secrets() {
   printf -v list '%s, ' "${_KCM_ENV_FILES[@]}"
   info "Scanning ${list%, }"
 
-  local -a names=() values=() files=() lines=() whys=() picked=() tracked=() tints=()
+  local -a names=() values=() files=() lines=() whys=() picked=() tracked=() tints=() sums=()
   # Default Keychain label per row and what the scan found there: "", readable or unreadable
   local -a labels=() kc_states=() kc_values=()
   # Lines that already hold a keychain:// reference, shown after the others
   local -a ref_names=() ref_files=() ref_whys=() ref_marks=() ref_tints=()
-  local file idx value why state tick tint is_tracked label existing n=0 m=0 in_keychain
+  local file idx value why state tick tint is_tracked label existing n=0 m=0 in_keychain sum
   # One attribute dump instead of a lookup per variable
   in_keychain=$'\n'"$(keychain_services '.*' | cut -d' ' -f2- | LC_ALL=C sort -u)"$'\n'
   for file in "${_KCM_ENV_FILES[@]}"; do
     is_tracked=false
     git -C "$(dirname "$file")" ls-files --error-unmatch -- "$(basename "$file")" >/dev/null 2>&1 && is_tracked=true
+    # Line ranges are only valid for this content: checked again before anything is stored
+    sum=$(cksum < "$file")
     process_env_file "$file"
     for idx in ${_KCM_PROCESSED_ENV_NAMES[@]+"${!_KCM_PROCESSED_ENV_NAMES[@]}"}; do
       value="${_KCM_PROCESSED_ENV_VALUES[$idx]}"
@@ -853,11 +860,6 @@ import_secrets() {
       state=""; tint=""
       tick=false
       [ -n "$why" ] && tick=true
-      case "${_KCM_PROCESSED_ENV_NAMES[$idx]}" in
-        # Bundlers ship these to the client, so they are public by design
-        NEXT_PUBLIC_*|VITE_*|PUBLIC_*|EXPO_PUBLIC_*|REACT_APP_*)
-          if [ -n "$why" ]; then tick=false; state="public, so unticked"; fi ;;
-      esac
       label="${_KCM_PROCESSED_ENV_NAMES[$idx]}"
       while [[ "$label" == _* ]]; do label="${label#_}"; done
       labels[n]="$label"; kc_states[n]=""; kc_values[n]=""
@@ -868,11 +870,16 @@ import_secrets() {
           state="${state:+$state, }in Keychain, unreadable"; tint="$_KCM_YELLOW"
         elif [ "$existing" = "$value" ]; then
           # Only the reference is written, nothing new is stored
-          state="in Keychain, same value"; tint="$_KCM_GREEN"; tick=true
+          state="${state:+$state, }in Keychain, same value"; tint="$_KCM_GREEN"; tick=true
         else
           state="${state:+$state, }in Keychain, different value"; tint="$_KCM_YELLOW"
         fi
       fi
+      case "${_KCM_PROCESSED_ENV_NAMES[$idx]}" in
+        # Bundlers ship these to the client, so they are public by design
+        NEXT_PUBLIC_*|VITE_*|PUBLIC_*|EXPO_PUBLIC_*|REACT_APP_*)
+          if [ "$tick" = true ]; then tick=false; state="${state:+$state, }public, so unticked"; fi ;;
+      esac
       if [ "$is_tracked" = true ]; then
         if [ "$tick" = true ]; then state="${state:+$state, }tracked by git, so unticked"
         else state="${state:+$state, }tracked by git"; fi
@@ -887,6 +894,7 @@ import_secrets() {
       picked[n]="$tick"
       tracked[n]="$is_tracked"
       tints[n]="$tint"
+      sums[n]="$sum"
       n=$((n + 1))
     done
   done
@@ -1003,6 +1011,21 @@ import_secrets() {
   IFS= read -r -p "Store $stores secret(s) and update ${#touched[@]} file(s)? [y/N] " answer || abort_import
   case "$answer" in y|Y|yes|YES) ;; *) abort_import ;; esac
 
+  # A file edited during the prompts no longer matches the scanned line ranges
+  local failed=false
+  for file in "${touched[@]}"; do
+    for (( i=0; i<n; i++ )); do
+      [ "${files[i]}" = "$file" ] || continue
+      [ "$(cksum < "$file")" = "${sums[i]}" ] && break
+      info "Warning: $file changed since the scan, leaving it as is; run import again"
+      failed=true
+      for (( j=0; j<n; j++ )); do
+        if [ "${files[j]}" = "$file" ]; then actions[j]=skip; fi
+      done
+      break
+    done
+  done
+
   # Store first; a line is only replaced once its value reads back from Keychain
   local source_path
   for (( i=0; i<n; i++ )); do
@@ -1011,6 +1034,7 @@ import_secrets() {
     case "$source_path" in "$HOME"/*) source_path="~${source_path#"$HOME"}" ;; esac
     if ! store_secret "${labels[i]}" "${values[i]}" "Imported by kcm from $source_path"; then
       info "Warning: could not store ${names[i]} from ${files[i]}, leaving it as is"
+      failed=true
       # Rows that chose to keep this value would point at an entry that never got it
       for (( j=0; j<n; j++ )); do
         if [ "${labels[j]}" = "${labels[i]}" ]; then actions[j]=skip; fi
@@ -1036,6 +1060,7 @@ import_secrets() {
       success "Updated $file"
     else
       info "Warning: could not update $file; its values are in Keychain, replace them by hand"
+      failed=true
     fi
   done
 
@@ -1044,6 +1069,7 @@ import_secrets() {
   if [ -n "$rotate" ]; then
     info "Old values stay in git history: rotate $rotate"
   fi
+  [ "$failed" = false ]
 }
 
 # Function to remove secret from keychain
@@ -1135,7 +1161,7 @@ keychain_services() {
   keychains=$(security list-keychains 2>/dev/null | tr -d '"' | sed '/^$/d') || keychains=""
   while IFS= read -r keychain; do
     [ -n "$keychain" ] || continue
-    keychain=$(echo "$keychain" | xargs)
+    keychain=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<< "$keychain")
     security dump-keychain "$keychain" 2>/dev/null | awk -v regex="$regex" -v user="$USER" '
       # Attribute value: "text" without the quotes, or <NULL> as is
       function val(line) {
