@@ -322,6 +322,20 @@ assert_equals "web root web" "$output" "Merges env files up to git root, closest
 output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- bash -c 'echo "[$ABOVE_ROOT]"' 2>/dev/null)
 assert_equals "[]" "$output" "Stops at git root"
 
+# Test: No command lists names and their source, never values
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use 2>/dev/null) && exit_code=$? || exit_code=$?
+assert_exit_code 0 "$exit_code" "No command lists variables"
+assert_equals "$(printf 'ROOT_ONLY ../../.env\nSHARED ./.env.local\nWEB_ONLY ./.env.local')" "$(echo "$output" | tr -s ' ')" "Lists names with winning file"
+assert_not_contains "$output" "root" "Listing hides values"
+
+# Test: --show-values prints merged values when piped
+output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use --show-values 2>/dev/null | cat)
+assert_equals "$(printf 'ROOT_ONLY=root\nSHARED=web\nWEB_ONLY=web')" "$output" "Show values prints merged values"
+
+# Test: --env-file with no command lists that file only
+output=$("$SCRIPT_PATH" use -e "$MONO/.env" 2>/dev/null | tr -s ' ')
+assert_equals "$(printf 'ROOT_ONLY %s\nSHARED %s' "$MONO/.env" "$MONO/.env")" "$output" "Lists names from explicit env file"
+
 # Test 26: Lists loaded files on stderr, closest first
 output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use -- true 2>&1 >/dev/null)
 assert_contains "$output" "Loaded ./.env.local, ../../.env" "Shows loaded env files"

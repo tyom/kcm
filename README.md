@@ -96,6 +96,19 @@ Without `--env-file`, `kcm use` searches from the current folder up to the git r
 
 `--env-file` loads exactly one file and skips the search.
 
+### Inspecting what `use` loads
+
+Run `kcm use` without a command to list the variables it would load, with the file each one comes from. Values stay hidden:
+
+```
+$ kcm use
+ℹ Loaded ./.env.local, ../../.env
+API_KEY       ./.env.local
+DATABASE_URL  ../../.env
+```
+
+Add `--show-values` (`-s`) to see the resolved values. They open in `less`, which clears the screen when you quit, so secrets don't stay in your terminal scrollback. When piped (`kcm use -s | grep DB`), it prints plain `NAME=value` lines.
+
 ### Managing Secrets
 
 ```bash
