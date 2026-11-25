@@ -401,32 +401,32 @@ merge_env_files() {
 # Print merged variables sorted by name.
 # show_values: false (name and source file), masked or full (NAME=value)
 print_merged_env() {
-  local show_values="$1"
-  local width=0 name k value
-  for name in ${_KCM_MERGED_NAMES[@]+"${_KCM_MERGED_NAMES[@]}"}; do
-    [ "${#name}" -gt "$width" ] && width=${#name}
+  local _kcm_show_values="$1"
+  local _kcm_width=0 _kcm_name _kcm_k _kcm_value
+  for _kcm_name in ${_KCM_MERGED_NAMES[@]+"${_KCM_MERGED_NAMES[@]}"}; do
+    [ "${#_kcm_name}" -gt "$_kcm_width" ] && _kcm_width=${#_kcm_name}
   done
 
   # Names are valid identifiers, so "NAME index" lines sort safely
-  for k in "${!_KCM_MERGED_NAMES[@]}"; do
-    printf '%s %s\n' "${_KCM_MERGED_NAMES[$k]}" "$k"
-  done | LC_ALL=C sort | while read -r name k; do
-    if [ "$show_values" = false ]; then
-      printf '%-*s  %s\n' "$width" "$name" "${_KCM_MERGED_SOURCES[$k]}"
+  for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
+    printf '%s %s\n' "${_KCM_MERGED_NAMES[$_kcm_k]}" "$_kcm_k"
+  done | LC_ALL=C sort | while read -r _kcm_name _kcm_k; do
+    if [ "$_kcm_show_values" = false ]; then
+      printf '%-*s  %s\n' "$_kcm_width" "$_kcm_name" "${_KCM_MERGED_SOURCES[$_kcm_k]}"
       continue
     fi
-    value="${_KCM_MERGED_VALUES[$k]}"
+    _kcm_value="${_KCM_MERGED_VALUES[$_kcm_k]}"
     # printenv adds one newline; the x keeps any newlines of the value itself
-    if is_exported "$name"; then value=$(printenv "$name"; echo x); value="${value%$'\nx'}"; fi
-    if [ "$show_values" = masked ]; then
+    if is_exported "$_kcm_name"; then _kcm_value=$(printenv "$_kcm_name"; echo x); _kcm_value="${_kcm_value%$'\nx'}"; fi
+    if [ "$_kcm_show_values" = masked ]; then
       # From 24 chars, first and last 4 reveal at most a third of the value
-      if [ ${#value} -ge 24 ]; then
-        value="${value:0:4}…${value: -4}"
-      elif [ -n "$value" ]; then
-        value="****"
+      if [ ${#_kcm_value} -ge 24 ]; then
+        _kcm_value="${_kcm_value:0:4}…${_kcm_value: -4}"
+      elif [ -n "$_kcm_value" ]; then
+        _kcm_value="****"
       fi
     fi
-    printf '%s=%s\n' "$name" "$value"
+    printf '%s=%s\n' "$_kcm_name" "$_kcm_value"
   done
 }
 
