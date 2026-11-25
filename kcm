@@ -1011,7 +1011,10 @@ import_secrets() {
     case "$source_path" in "$HOME"/*) source_path="~${source_path#"$HOME"}" ;; esac
     if ! store_secret "${labels[i]}" "${values[i]}" "Imported by kcm from $source_path"; then
       info "Warning: could not store ${names[i]} from ${files[i]}, leaving it as is"
-      actions[i]=skip
+      # Rows that chose to keep this value would point at an entry that never got it
+      for (( j=0; j<n; j++ )); do
+        if [ "${labels[j]}" = "${labels[i]}" ]; then actions[j]=skip; fi
+      done
     fi
   done
 
