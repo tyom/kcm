@@ -35,6 +35,9 @@ cleanup() {
     security delete-generic-password -s "TEST_PATTERN_ONE" >/dev/null 2>&1 || true
     security delete-generic-password -s "TEST_PATTERN_TWO" >/dev/null 2>&1 || true
     security delete-generic-password -s "OTHER_PATTERN" >/dev/null 2>&1 || true
+    for suffix in API_KEY MULTI CLASH RENAMED; do
+        security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
+    done
 
     # Remove test directory
     rm -rf "$TEST_DIR"
@@ -478,6 +481,113 @@ assert_equals "mine" "$(cat "$WRAP/bin/other")" "Existing file left unchanged"
 output=$(cd "$WRAP" && "$SCRIPT_PATH" install-wrapper ../outside/with-env 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 1 "$exit_code" "Rejects a location outside the git root"
 [ ! -e "$TEST_DIR/outside/with-env" ] && pass "Writes nothing outside the git root" || fail "Writes nothing outside the git root"
+echo
+echo "Test Group: Import"
+echo "------------------"
+IMP="$TEST_DIR/import"
+mkdir -p "$IMP"
+
+# A likely secret is pre-ticked: Enter accepts the list, y confirms
+cat > "$IMP/.env" << EOF
+# config
+${TEST_KEY}_API_KEY=sk-test-123
+PORT=3000
+EOF
+(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "sk-test-123" "$("$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" 2>&1)" "Import stores a detected secret"
+assert_equals "$(printf '# config\n%s="keychain://%s"\nPORT=3000' "${TEST_KEY}_API_KEY" "${TEST_KEY}_API_KEY")" "$(cat "$IMP/.env")" "Import replaces only the imported line"
+
+# A multiline quoted value is stored whole and its extra lines are removed
+cat > "$IMP/.env" << EOF
+export ${TEST_KEY}_MULTI="-----BEGIN KEY-----
+abc
+-----END KEY-----" # pem
+AFTER=1
+EOF
+(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "$(printf -- '-----BEGIN KEY-----\nabc\n-----END KEY-----')" "$("$SCRIPT_PATH" show "${TEST_KEY}_MULTI" 2>&1)" "Import stores a multiline value whole"
+assert_equals "$(printf 'export %s="keychain://%s"\nAFTER=1' "${TEST_KEY}_MULTI" "${TEST_KEY}_MULTI")" "$(cat "$IMP/.env")" "Import collapses a multiline value to one reference line"
+
+# A name already in Keychain with another value: keep it, or rename the new one
+echo "old-value" | "$SCRIPT_PATH" add "${TEST_KEY}_CLASH" - >/dev/null 2>&1
+echo "${TEST_KEY}_CLASH=new-value" > "$IMP/.env"
+(cd "$IMP" && printf '\nk\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "old-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_CLASH" 2>&1)" "Import keep leaves the Keychain value"
+assert_equals "${TEST_KEY}_CLASH=\"keychain://${TEST_KEY}_CLASH\"" "$(cat "$IMP/.env")" "Import keep references the existing entry"
+
+echo "${TEST_KEY}_CLASH=new-value" > "$IMP/.env"
+(cd "$IMP" && printf '\nr\n%s\ny\n' "${TEST_KEY}_RENAMED" | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "new-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_RENAMED" 2>&1)" "Import rename stores under the new name"
+assert_equals "${TEST_KEY}_CLASH=\"keychain://${TEST_KEY}_RENAMED\"" "$(cat "$IMP/.env")" "Import rename references the new name"
+
+# Quitting at the confirmation changes nothing; the list ticks likely secrets and masks values
+"$SCRIPT_PATH" remove "${TEST_KEY}_API_KEY" >/dev/null 2>&1
+cat > "$IMP/.env" << EOF
+${TEST_KEY}_API_KEY=sk-live-abcdefghijklmnopqrstuvwxyz
+DB=postgres://user:pw@localhost/db
+NEXT_PUBLIC_MAP_KEY=pk-public
+PORT=3000
+EOF
+before=$(cat "$IMP/.env")
+output=$(cd "$IMP" && printf '\n' | "$SCRIPT_PATH" import 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "Import cancelled at the confirmation exits 1"
+assert_equals "$before" "$(cat "$IMP/.env")" "Import cancelled leaves the file unchanged"
+"$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" >/dev/null 2>&1 && fail "Import cancelled stores nothing" || pass "Import cancelled stores nothing"
+assert_not_contains "$output" "abcdefghijklmnop" "Import list masks values"
+assert_contains "$output" "[x]  1  ${TEST_KEY}_API_KEY" "Import ticks a secret by name"
+assert_contains "$output" "[x]  2  DB" "Import ticks a URL with a password"
+assert_contains "$output" "[ ]  3  NEXT_PUBLIC_MAP_KEY" "Import leaves public-prefixed names unticked"
+assert_contains "$output" "[ ]  4  PORT" "Import leaves plain settings unticked"
+assert_contains "$(grep "${TEST_KEY}_API_KEY" <<< "$output")" "name has KEY, starts with sk-" "Import notes say which word and prefix matched"
+assert_contains "$(grep ' DB ' <<< "$output")" "URL with password" "Import notes a URL with a password"
+assert_contains "$(grep NEXT_PUBLIC_MAP_KEY <<< "$output")" "name has KEY · public, so unticked" "Import notes why a public name is unticked"
+
+# The same name in two files: the closer, higher-priority file gets the plain name.
+# A git-tracked file is listed but not ticked.
+IG="$TEST_DIR/import-git"
+mkdir -p "$IG"
+git -C "$IG" init -q
+echo "${TEST_KEY}_API_KEY=shared-value" > "$IG/.env"
+git -C "$IG" add .env
+echo "${TEST_KEY}_API_KEY=local-value" > "$IG/.env.local"
+"$SCRIPT_PATH" remove "${TEST_KEY}_API_KEY" >/dev/null 2>&1
+"$SCRIPT_PATH" remove "${TEST_KEY}_RENAMED" >/dev/null 2>&1
+output=$(cd "$IG" && printf '2\n\nr\n%s\ny\n' "${TEST_KEY}_RENAMED" | "$SCRIPT_PATH" import 2>&1)
+assert_contains "$output" "[ ]  2  ${TEST_KEY}_API_KEY  ./.env" "Import leaves a git-tracked file unticked"
+assert_equals "local-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" 2>&1)" "Import gives the plain name to .env.local"
+assert_equals "shared-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_RENAMED" 2>&1)" "Import stores the clashing .env value under the new name"
+assert_equals "${TEST_KEY}_API_KEY=\"keychain://${TEST_KEY}_RENAMED\"" "$(cat "$IG/.env")" "Import points .env at the renamed entry"
+
+# In a terminal: space toggles, the down arrow moves, Enter accepts.
+# script runs kcm on a pseudo-terminal so it uses the key-driven list.
+"$SCRIPT_PATH" remove "${TEST_KEY}_API_KEY" >/dev/null 2>&1
+"$SCRIPT_PATH" remove "${TEST_KEY}_CLASH" >/dev/null 2>&1
+printf '%s\n' "${TEST_KEY}_API_KEY=first" "${TEST_KEY}_CLASH=second" > "$IMP/.env"
+(cd "$IMP" && printf ' \033[B\ny\n' | script -q /dev/null "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "$(printf '%s=first\n%s="keychain://%s"' "${TEST_KEY}_API_KEY" "${TEST_KEY}_CLASH" "${TEST_KEY}_CLASH")" "$(cat "$IMP/.env")" "Import picks with arrow keys and space in a terminal"
+
+# The list marks names already in Keychain and shows existing references
+echo "same" | "$SCRIPT_PATH" add "${TEST_KEY}_API_KEY" - >/dev/null 2>&1
+echo "old" | "$SCRIPT_PATH" add "${TEST_KEY}_CLASH" - >/dev/null 2>&1
+cat > "$IMP/.env" << EOF
+${TEST_KEY}_API_KEY=same
+${TEST_KEY}_CLASH=new
+DONE_REF=keychain://${TEST_KEY}_API_KEY
+BROKEN_REF=keychain://${TEST_KEY}_MISSING
+EOF
+output=$(cd "$IMP" && printf '\n' | "$SCRIPT_PATH" import 2>&1 | sed $'s/\033\\[[0-9;]*m//g')
+assert_contains "$output" "${TEST_KEY}_API_KEY  ./.env  ****       name has KEY · in Keychain, same value" "Import marks a name in Keychain with the same value"
+assert_contains "$output" "${TEST_KEY}_CLASH    ./.env  ****       name has KEY · in Keychain, different value" "Import marks a name in Keychain with another value"
+assert_contains "$(grep DONE_REF <<< "$output")" "✓" "Import shows an existing reference as done"
+assert_contains "$(grep BROKEN_REF <<< "$output")" "missing from Keychain" "Import flags a reference missing from Keychain"
+
+# In the key-driven list, the NAME heading starts in the same column as the names
+printf 'LONG_NAME_FOR_ALIGN=plain\n' > "$IMP/.env"
+output=$(cd "$IMP" && printf 'q' | script -q /dev/null "$SCRIPT_PATH" import 2>&1 | sed $'s/\033\\[[0-9;?]*[A-Za-z]//g' | tr -d '\r')
+header=$(grep -m1 'NAME' <<< "$output"); row=$(grep -m1 'LONG_NAME_FOR_ALIGN' <<< "$output")
+header="${header%%NAME*}"; row="${row%%LONG_NAME_FOR_ALIGN*}"
+assert_equals "${#header}" "${#row}" "Import list headings line up with the columns"
+
 echo
 echo "Test Group: Pattern Matching"
 echo "----------------------------"

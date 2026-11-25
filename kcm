@@ -20,6 +20,10 @@ _KCM_NC='\033[0m' # No Color
 # Arrays holding processed env assignments (stay in memory)
 declare -a _KCM_PROCESSED_ENV_NAMES=()
 declare -a _KCM_PROCESSED_ENV_VALUES=()
+# start:end line numbers of each assignment (end differs for multiline values)
+declare -a _KCM_PROCESSED_ENV_LINES=()
+# import sets this to false to read keychain:// references as plain text
+_KCM_RESOLVE_REFS=true
 
 # Helper functions
 error_exit() {
@@ -110,6 +114,21 @@ COMMANDS:
       kcm use -e .env -- npm run dev
       kcm use --env-file ../.env -- make run-server
       kcm use -e .env -- echo \$DATABASE_URL
+
+  import [-e FILE]
+    Move plain values from .env files into Keychain and replace them with
+    keychain:// references. Lists the values (masked) with likely secrets
+    ticked: up/down to move, space to toggle, a for all, Enter to continue.
+    Then asks how to handle names already in Keychain, and confirms.
+    Without -e, scans every .env and .env.* file from the current folder up
+    to the git root (*.example, *.sample and *.template are skipped).
+
+    Options:
+      -e, --env-file FILE   - Only import from this file
+
+    Examples:
+      kcm import
+      kcm import -e .env.local
 
   install-wrapper [PATH]
     Add a script to the current git repo that runs a command through 'kcm use'
@@ -261,11 +280,11 @@ is_exported() {
   [[ "$_KCM_EXPORTED_NAMES" == *$'\n'"$1"$'\n'* ]]
 }
 
-# Record one assignment, resolving a keychain:// reference
+# Record one assignment and its start:end lines, resolving a keychain:// reference
 add_env_value() {
-  local name="$1" value="$2" resolved
+  local name="$1" value="$2" lines="$3" resolved
   # The environment wins, so skip the lookup and its Keychain prompt
-  if [[ "$value" == keychain://* ]] && ! is_exported "$name"; then
+  if [ "$_KCM_RESOLVE_REFS" = true ] && [[ "$value" == keychain://* ]] && ! is_exported "$name"; then
     if resolved=$(read_secret "${value#keychain://}") && [ -n "$resolved" ]; then
       value="$resolved"
     else
@@ -274,6 +293,7 @@ add_env_value() {
   fi
   _KCM_PROCESSED_ENV_NAMES+=("$name")
   _KCM_PROCESSED_ENV_VALUES+=("$value")
+  _KCM_PROCESSED_ENV_LINES+=("$lines")
 }
 
 # Parse an env file into _KCM_PROCESSED_ENV_NAMES and _KCM_PROCESSED_ENV_VALUES.
@@ -282,18 +302,20 @@ process_env_file() {
   local env_file="$1"
   _KCM_PROCESSED_ENV_NAMES=()
   _KCM_PROCESSED_ENV_VALUES=()
+  _KCM_PROCESSED_ENV_LINES=()
   [ -f "$env_file" ] || return 0
 
-  local line var_name="" var_value="" quote_char=""
+  local line var_name="" var_value="" quote_char="" lineno=0 start=0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
+    lineno=$((lineno + 1))
 
     # Inside a multiline value, until a line with the closing quote
     if [ -n "$quote_char" ]; then
       if find_closing_quote "$line" "$quote_char"; then
         [ -n "$_KCM_QUOTED_VALUE" ] && var_value+=$'\n'"$_KCM_QUOTED_VALUE"
         quote_char=""
-        add_env_value "$var_name" "$var_value"
+        add_env_value "$var_name" "$var_value" "$start:$lineno"
       else
         var_value+=$'\n'"$line"
       fi
@@ -307,6 +329,7 @@ process_env_file() {
     var_name="${var_name#export }"
     var_value="${line#*=}"
     [[ "$var_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    start=$lineno
 
     case "$var_value" in
       \"*|\'*)
@@ -318,7 +341,7 @@ process_env_file() {
         quote_char=""
         ;;
     esac
-    add_env_value "$var_name" "$var_value"
+    add_env_value "$var_name" "$var_value" "$start:$lineno"
   done < "$env_file"
 }
 
@@ -398,6 +421,17 @@ merge_env_files() {
   done
 }
 
+# Print a value safe to show: from 24 chars the first and last 4 (at most a third of it), else ****
+mask_value() {
+  local value="$1"
+  if [ ${#value} -ge 24 ]; then
+    value="${value:0:4}…${value: -4}"
+    printf '%s' "${value//$'\n'/ }"
+  elif [ -n "$value" ]; then
+    printf '****'
+  fi
+}
+
 # Print merged variables sorted by name.
 # show_values: false (name and source file), masked or full (NAME=value)
 print_merged_env() {
@@ -418,14 +452,7 @@ print_merged_env() {
     _kcm_value="${_KCM_MERGED_VALUES[$_kcm_k]}"
     # printenv adds one newline; the x keeps any newlines of the value itself
     if is_exported "$_kcm_name"; then _kcm_value=$(printenv "$_kcm_name"; echo x); _kcm_value="${_kcm_value%$'\nx'}"; fi
-    if [ "$_kcm_show_values" = masked ]; then
-      # From 24 chars, first and last 4 reveal at most a third of the value
-      if [ ${#_kcm_value} -ge 24 ]; then
-        _kcm_value="${_kcm_value:0:4}…${_kcm_value: -4}"
-      elif [ -n "$_kcm_value" ]; then
-        _kcm_value="****"
-      fi
-    fi
+    [ "$_kcm_show_values" = masked ] && _kcm_value=$(mask_value "$_kcm_value")
     printf '%s=%s\n' "$_kcm_name" "$_kcm_value"
   done
 }
@@ -551,6 +578,461 @@ WRAPPER
   info "Use it in scripts, e.g. \"dev\": \"$path vite\", and commit it"
 }
 
+# Print why a value looks like a secret ("name has KEY, starts with sk-"), or nothing
+secret_reason() {
+  local name="$1" value="$2" upper reasons="" word prefix
+  upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
+  # Longer words first, so DB_PASSWORD reports PASSWORD rather than PASS
+  for word in PASSWORD CREDENTIAL PRIVATE SECRET TOKEN SALT AUTH PASS PWD DSN KEY; do
+    if [[ "$upper" == *"$word"* ]]; then reasons="name has $word"; break; fi
+  done
+  local url_re='^[A-Za-z][A-Za-z0-9+.-]*://[^/:@]+:[^/@]+@'
+  local kind=""
+  case "$value" in
+    -----BEGIN*) kind="private key" ;;
+    eyJ*.*.*) kind="JWT" ;;
+    *)
+      for prefix in sk_live_ sk_test_ rk_live_ sk- github_pat_ ghp_ gho_ ghs_ glpat- xoxa- xoxb- xoxp- xoxr- AKIA AIza npm_; do
+        if [[ "$value" == "$prefix"* ]]; then kind="starts with $prefix"; break; fi
+      done
+      if [ -z "$kind" ] && [[ "$value" =~ $url_re ]]; then
+        kind="URL with password"
+      elif [ -z "$kind" ] && [ ${#value} -ge 32 ] && [[ "$value" =~ ^[^[:space:]]+$ ]] \
+        && [[ "$value" =~ [A-Za-z] ]] && [[ "$value" =~ [0-9] ]]; then
+        kind="looks random"
+      fi
+      ;;
+  esac
+  [ -n "$kind" ] && reasons="${reasons:+$reasons, }$kind"
+  printf '%s' "$reasons"
+}
+
+# Find every .env and .env.* file from cwd up to the git root (cwd only outside git).
+# Unlike discover_env_files, not limited to the current mode. Sets _KCM_ENV_FILES.
+discover_import_files() {
+  local dir rel="./" root f name
+  dir=$(pwd -P)
+  root=$(find_git_root) || root="$dir"
+  while :; do
+    # Highest priority first (.local before the rest, .env last), so a name clash
+    # offers the plain Keychain name to the file `use` would read
+    for f in "$dir"/.env.*.local "$dir/.env.local" "$dir"/.env.* "$dir/.env"; do
+      [ -f "$f" ] || continue
+      name="${f##*/}"
+      case "$name" in *.example|*.sample|*.template) continue ;; esac
+      case " ${_KCM_ENV_FILES[*]+${_KCM_ENV_FILES[*]}} " in *" $rel$name "*) continue ;; esac
+      _KCM_ENV_FILES+=("$rel$name")
+    done
+    [ "$dir" = "$root" ] && break
+    dir="${dir%/*}"; dir="${dir:-/}"
+    if [ "$rel" = "./" ]; then rel="../"; else rel="../$rel"; fi
+  done
+}
+
+abort_import() {
+  info "Import cancelled, nothing changed"
+  exit 1
+}
+
+# The two pickers below run inside import_secrets and update its picked array, using
+# its n (pickable rows), total (rows incl. existing references), rows, marks, tints and header.
+
+# Pick by typing numbers or ranges (used when input is not a terminal)
+pick_import_numbers() {
+  local input tok a b i box
+  local -a toks
+  while :; do
+    echo "" >&2
+    printf '     #  %s\n' "$header" >&2
+    for (( i=0; i<total; i++ )); do
+      if [ "$i" -lt "$n" ]; then
+        box='[ ]'; [ "${picked[i]}" = true ] && box='[x]'
+        printf '%b%s %2d  %s%b\n' "${tints[i]}" "$box" $((i + 1)) "${rows[i]}" "$_KCM_NC" >&2
+      else
+        printf '%b%s     %s%b\n' "${tints[i]}" "${marks[i]}" "${rows[i]}" "$_KCM_NC" >&2
+      fi
+    done
+    echo "" >&2
+    IFS= read -r -p "Toggle (e.g. 3 or 1-2), Enter to continue, q to quit: " input || abort_import
+    case "$input" in
+      '') break ;;
+      q|Q) abort_import ;;
+    esac
+    read -ra toks <<< "${input//,/ }"
+    for tok in ${toks[@]+"${toks[@]}"}; do
+      if [[ "$tok" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        a=$((10#${BASH_REMATCH[1]})); b=$((10#${BASH_REMATCH[2]}))
+      elif [[ "$tok" =~ ^[0-9]+$ ]]; then
+        a=$((10#$tok)); b=$a
+      else
+        info "Ignoring '$tok'"
+        continue
+      fi
+      for (( i=a; i<=b; i++ )); do
+        [ "$i" -ge 1 ] && [ "$i" -le "$n" ] || continue
+        if [ "${picked[i-1]}" = true ]; then picked[i-1]=false; else picked[i-1]=true; fi
+      done
+    done
+  done
+}
+
+# Pick with keys in a terminal: up/down or k/j move, space toggles, a toggles all,
+# Enter accepts, q quits. Redraws in place and scrolls when the list is taller than the screen.
+pick_import_keys() {
+  local cur=0 top=0 height drawn=0 key rest i line term_rows term_cols box status
+  # Hidden cursor, restored however kcm exits
+  printf '\033[?25l' >&2
+  trap 'printf "\033[?25h" >&2' EXIT
+  trap 'exit 130' INT TERM
+  echo "" >&2
+  while :; do
+    read -r term_rows term_cols <<< "$(stty size 2>/dev/null)" || true
+    # Some terminals report 0 0 (e.g. under script); assume 24x80
+    [ "${term_rows:-0}" -gt 0 ] || term_rows=24
+    [ "${term_cols:-0}" -gt 10 ] || term_cols=80
+    height=$((term_rows - 4))
+    [ "$height" -lt 3 ] && height=3
+    [ "$height" -gt "$total" ] && height=$total
+    [ "$cur" -lt "$top" ] && top=$cur
+    [ "$cur" -ge $((top + height)) ] && top=$((cur - height + 1))
+
+    # Back to the top of the last draw and clear below it
+    [ "$drawn" -gt 0 ] && printf '\033[%dA\033[J' "$drawn" >&2
+    # Rows start with "> [x]  " (7 chars), so the header needs 7 spaces
+    line="       $header"
+    printf '%s\n' "${line:0:term_cols-1}" >&2
+    for (( i=top; i<top+height; i++ )); do
+      if [ "$i" -ge "$n" ]; then box="${marks[i]}"
+      elif [ "${picked[i]}" = true ]; then box='[x]'
+      else box='[ ]'; fi
+      line="$box  ${rows[i]}"
+      # Cut to the screen width: a wrapped line would break the redraw
+      line="${line:0:term_cols-3}"
+      if [ "$i" -eq "$cur" ]; then
+        # Dark text on light grey: softer than reverse video, and readable on any theme.
+        # The row's own tint is dropped here, as green or yellow would not read on grey.
+        printf '\033[48;5;250;38;5;234m> %s\033[0m\n' "$line" >&2
+      else
+        printf '%b  %s\033[0m\n' "${tints[i]}" "$line" >&2
+      fi
+    done
+    status="↑/↓ move  space toggle  a all  enter continue  q quit"
+    [ "$total" -gt "$height" ] && status="$status  ($((top + 1))-$((top + height)) of $total)"
+    printf '\033[90m%s\033[0m\n' "${status:0:term_cols-1}" >&2
+    drawn=$((height + 2))
+
+    IFS= read -rsn1 key || abort_import
+    if [ "$key" = $'\033' ]; then
+      # Arrow keys send ESC [ A/B (or ESC O A/B); a lone Esc just times out
+      IFS= read -rsn2 -t 1 rest || rest=""
+      case "$rest" in
+        '[A'|'OA') key=up ;;
+        '[B'|'OB') key=down ;;
+        *) key=ignore ;;
+      esac
+    fi
+    case "$key" in
+      up|k) if [ "$cur" -gt 0 ]; then cur=$((cur - 1)); fi ;;
+      # The cursor can reach reference rows so long lists can scroll to them; they can't be ticked
+      down|j) if [ "$cur" -lt $((total - 1)) ]; then cur=$((cur + 1)); fi ;;
+      ' ')
+        if [ "$cur" -lt "$n" ]; then
+          if [ "${picked[cur]}" = true ]; then picked[cur]=false; else picked[cur]=true; fi
+        fi
+        ;;
+      a|A)
+        # Tick all, or untick all when everything is already ticked
+        box=false
+        for (( i=0; i<n; i++ )); do [ "${picked[i]}" = true ] || box=true; done
+        for (( i=0; i<n; i++ )); do picked[i]=$box; done
+        ;;
+      '') break ;;
+      q|Q) abort_import ;;
+    esac
+  done
+  printf '\033[?25h' >&2
+  trap - EXIT INT TERM
+}
+
+# Rewrite FILE, replacing assignments given as "start:end:NAME=..." specs.
+# Writes a temp file next to it and moves it over, so a failed write leaves the file intact.
+rewrite_env_file() {
+  local file="$1"; shift
+  local tmp lineno=0 skip_to=0 line spec rest out
+  tmp=$(mktemp "$(dirname "$file")/.kcm-import.XXXXXX") || return 1
+  # The temp file holds the other lines in plain text, so remove it if kcm is interrupted
+  _KCM_IMPORT_TMP="$tmp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    [ "$lineno" -le "$skip_to" ] && continue
+    out="$line"
+    for spec in "$@"; do
+      [ "${spec%%:*}" = "$lineno" ] || continue
+      rest="${spec#*:}"
+      skip_to="${rest%%:*}"
+      out="${rest#*:}"
+      [[ "$line" == "export "* ]] && out="export $out"
+      [[ "$line" == *$'\r' ]] && out="$out"$'\r'
+      break
+    done
+    printf '%s\n' "$out"
+  done < "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+  # shortcut: mv replaces a symlinked env file with a regular file; resolve links if that comes up
+  # /usr/bin/stat: GNU stat from coreutils takes different flags
+  chmod "$(/usr/bin/stat -f %Lp "$file")" "$tmp" && mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  _KCM_IMPORT_TMP=""
+}
+
+# Move plain values from env files into Keychain and replace them with keychain:// references
+import_secrets() {
+  if ! command -v security >/dev/null 2>&1; then
+    error_exit "This command requires macOS with the 'security' command"
+  fi
+
+  local env_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -e|--env-file)
+        [ -n "${2:-}" ] || error_exit "-e/--env-file requires an argument"
+        env_file="$2"
+        shift 2
+        ;;
+      *) error_exit "Unknown option '$1'. Usage: $_KCM_SCRIPT_NAME import [-e FILE]" ;;
+    esac
+  done
+
+  _KCM_ENV_FILES=()
+  if [ -n "$env_file" ]; then
+    [ -f "$env_file" ] || error_exit "Env file '$env_file' not found"
+    _KCM_ENV_FILES=("$env_file")
+  else
+    discover_import_files
+    [ ${#_KCM_ENV_FILES[@]} -gt 0 ] || error_exit "No .env files found"
+  fi
+  local list
+  printf -v list '%s, ' "${_KCM_ENV_FILES[@]}"
+  info "Scanning ${list%, }"
+
+  # Read keychain:// references as text; those values are already imported
+  _KCM_RESOLVE_REFS=false
+  local -a names=() values=() files=() lines=() whys=() picked=() tracked=() tints=()
+  # Lines that already hold a keychain:// reference, shown after the others
+  local -a ref_names=() ref_files=() ref_whys=() ref_marks=() ref_tints=()
+  local file idx value why state tick tint is_tracked label existing n=0 m=0 in_keychain
+  # One attribute dump instead of a lookup per variable
+  in_keychain=$'\n'"$(keychain_services '.*' | LC_ALL=C sort -u)"$'\n'
+  for file in "${_KCM_ENV_FILES[@]}"; do
+    is_tracked=false
+    git -C "$(dirname "$file")" ls-files --error-unmatch -- "$(basename "$file")" >/dev/null 2>&1 && is_tracked=true
+    process_env_file "$file"
+    for idx in ${_KCM_PROCESSED_ENV_NAMES[@]+"${!_KCM_PROCESSED_ENV_NAMES[@]}"}; do
+      value="${_KCM_PROCESSED_ENV_VALUES[$idx]}"
+      [ -n "$value" ] || continue
+      if [[ "$value" == keychain://* ]]; then
+        ref_names[m]="${_KCM_PROCESSED_ENV_NAMES[$idx]}"
+        ref_files[m]="$file"
+        if [[ "$in_keychain" == *$'\n'"${value#keychain://}"$'\n'* ]]; then
+          ref_marks[m]='✓'; ref_tints[m]="$_KCM_GREY"; ref_whys[m]="$value"
+        else
+          ref_marks[m]='!'; ref_tints[m]="$_KCM_YELLOW"; ref_whys[m]="$value missing from Keychain"
+        fi
+        m=$((m + 1))
+        continue
+      fi
+      # Notes: reasons it looks secret, then after a dot what changed the default tick
+      why=$(secret_reason "${_KCM_PROCESSED_ENV_NAMES[$idx]}" "$value")
+      state=""; tint=""
+      tick=false
+      [ -n "$why" ] && tick=true
+      case "${_KCM_PROCESSED_ENV_NAMES[$idx]}" in
+        # Bundlers ship these to the client, so they are public by design
+        NEXT_PUBLIC_*|VITE_*|PUBLIC_*|EXPO_PUBLIC_*|REACT_APP_*)
+          if [ -n "$why" ]; then tick=false; state="public, so unticked"; fi ;;
+      esac
+      label="${_KCM_PROCESSED_ENV_NAMES[$idx]}"
+      while [[ "$label" == _* ]]; do label="${label#_}"; done
+      if [[ "$in_keychain" == *$'\n'"$label"$'\n'* ]]; then
+        if ! existing=$(read_secret "$label"); then
+          state="${state:+$state, }in Keychain, unreadable"; tint="$_KCM_YELLOW"
+        elif [ "$existing" = "$value" ]; then
+          # Only the reference is written, nothing new is stored
+          state="in Keychain, same value"; tint="$_KCM_GREEN"; tick=true
+        else
+          state="${state:+$state, }in Keychain, different value"; tint="$_KCM_YELLOW"
+        fi
+      fi
+      if [ "$is_tracked" = true ]; then
+        if [ "$tick" = true ]; then state="${state:+$state, }tracked by git, so unticked"
+        else state="${state:+$state, }tracked by git"; fi
+        tick=false
+      fi
+      if [ -n "$why" ] && [ -n "$state" ]; then why="$why · $state"; else why="$why$state"; fi
+      names[n]="${_KCM_PROCESSED_ENV_NAMES[$idx]}"
+      values[n]="$value"
+      files[n]="$file"
+      lines[n]="${_KCM_PROCESSED_ENV_LINES[$idx]}"
+      whys[n]="$why"
+      picked[n]="$tick"
+      tracked[n]="$is_tracked"
+      tints[n]="$tint"
+      n=$((n + 1))
+    done
+  done
+  if [ "$n" -eq 0 ]; then
+    if [ "$m" -gt 0 ]; then info "No plain values to import; $m already use keychain://"; else info "No plain values to import"; fi
+    return 0
+  fi
+
+  # Row text without the tick box, built once so redraws need no subshells
+  local nw=4 fw=4 i mask header row total=$((n + m))
+  local -a rows=() marks=()
+  for (( i=0; i<n; i++ )); do
+    [ ${#names[i]} -gt "$nw" ] && nw=${#names[i]}
+    [ ${#files[i]} -gt "$fw" ] && fw=${#files[i]}
+  done
+  for (( i=0; i<m; i++ )); do
+    [ ${#ref_names[i]} -gt "$nw" ] && nw=${#ref_names[i]}
+    [ ${#ref_files[i]} -gt "$fw" ] && fw=${#ref_files[i]}
+  done
+  printf -v header '%-*s  %-*s  %-9s  %s' "$nw" NAME "$fw" FILE VALUE NOTES
+  for (( i=0; i<n; i++ )); do
+    mask=$(mask_value "${values[i]}")
+    # Pad by characters: printf pads by bytes, and … is 3 bytes
+    # bash 3.2 printf -v can't write an array element
+    printf -v row '%-*s  %-*s  %s%*s  %s' "$nw" "${names[i]}" "$fw" "${files[i]}" \
+      "$mask" $((9 - ${#mask})) '' "${whys[i]}"
+    rows[i]="$row"
+  done
+  # Reference rows have a fixed mark instead of a tick box and can't be picked
+  for (( i=0; i<m; i++ )); do
+    printf -v row '%-*s  %-*s  %-9s  %s' "$nw" "${ref_names[i]}" "$fw" "${ref_files[i]}" '' "${ref_whys[i]}"
+    rows[n+i]="$row"
+    marks[n+i]="${ref_marks[i]}  "
+    tints[n+i]="${ref_tints[i]}"
+  done
+
+  if [ -t 0 ] && [ -t 2 ]; then
+    pick_import_keys
+  else
+    pick_import_numbers
+  fi
+
+  # Choose a Keychain label for each picked value. action: store, ref (already there) or skip
+  local repo label existing found answer j clash_with shown
+  local -a labels=() actions=()
+  repo=$(find_git_root 2>/dev/null || pwd -P)
+  repo=$(printf '%s' "${repo##*/}" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')
+  for (( i=0; i<n; i++ )); do
+    actions[i]=skip
+    [ "${picked[i]}" = true ] || continue
+    label="${names[i]}"
+    while [[ "$label" == _* ]]; do label="${label#_}"; done
+    while :; do
+      if ! [[ "$label" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]]; then
+        info "'$label' can't be a Keychain name: use a letter first, then letters, numbers and underscores"
+        IFS= read -r -p "Keychain name for ${names[i]}: " label || abort_import
+        case "$label" in q|Q) abort_import ;; esac
+        continue
+      fi
+      # Values picked earlier in this run are not stored yet, so check them first
+      found=false; clash_with="in Keychain"; shown=""
+      for (( j=0; j<i; j++ )); do
+        if [ "${actions[j]}" = store ] && [ "${labels[j]}" = "$label" ]; then
+          found=true; existing="${values[j]}"; clash_with="picked from ${files[j]}"
+        fi
+      done
+      if [ "$found" = false ]; then
+        if existing=$(read_secret "$label"); then
+          found=true
+        elif keychain_entry_exists "$label"; then
+          # Exists but kcm can't read it: never overwrite it unasked
+          found=true; existing=""; shown="unreadable"
+        fi
+      fi
+      if [ "$found" = false ]; then actions[i]=store; break; fi
+      if [ -z "$shown" ] && [ "$existing" = "${values[i]}" ]; then actions[i]=ref; break; fi
+
+      info "$label is $clash_with with a different value (${shown:-$(mask_value "$existing")}) than ${files[i]} ($(mask_value "${values[i]}"))"
+      IFS= read -r -p "[o]verwrite  [k]eep that value (drops the file value)  [r]ename  [s]kip: " answer || abort_import
+      case "$answer" in
+        o|O) actions[i]=store; break ;;
+        k|K) actions[i]=ref; break ;;
+        s|S) break ;;
+        q|Q) abort_import ;;
+        r|R)
+          IFS= read -r -p "New Keychain name [${repo}_$label]: " answer || abort_import
+          case "$answer" in q|Q) abort_import ;; esac
+          label="${answer:-${repo}_$label}"
+          ;;
+      esac
+    done
+    labels[i]="$label"
+  done
+
+  # Summary and confirmation
+  local stores=0 refs=0 file_count=0
+  local -a touched=()
+  echo "" >&2
+  for (( i=0; i<n; i++ )); do
+    case "${actions[i]}" in
+      store) stores=$((stores + 1)); echo "  ${names[i]} (${files[i]}) → keychain://${labels[i]}" >&2 ;;
+      ref) refs=$((refs + 1)); echo "  ${names[i]} (${files[i]}) → keychain://${labels[i]} (already in Keychain)" >&2 ;;
+      *) continue ;;
+    esac
+    case " ${touched[*]+${touched[*]}} " in *" ${files[i]} "*) ;; *) touched+=("${files[i]}") ;; esac
+  done
+  if [ $((stores + refs)) -eq 0 ]; then
+    info "Nothing to import"
+    return 0
+  fi
+  file_count=${#touched[@]}
+  IFS= read -r -p "Store $stores secret(s) and update $file_count file(s)? [y/N] " answer || abort_import
+  case "$answer" in y|Y|yes|YES) ;; *) abort_import ;; esac
+
+  # Store first; a line is only replaced once its value reads back from Keychain
+  local -a done_items=()
+  for (( i=0; i<n; i++ )); do
+    done_items[i]=false
+    case "${actions[i]}" in
+      store)
+        if store_secret "${labels[i]}" "${values[i]}"; then
+          done_items[i]=true
+        else
+          info "Warning: could not store ${names[i]} from ${files[i]}, leaving it as is"
+        fi
+        ;;
+      ref) done_items[i]=true ;;
+    esac
+  done
+
+  local -a specs
+  local imported=0 rotate=""
+  _KCM_IMPORT_TMP=""
+  trap 'rm -f "${_KCM_IMPORT_TMP:-}"' EXIT
+  trap 'exit 130' INT TERM
+  for file in "${touched[@]}"; do
+    specs=()
+    for (( i=0; i<n; i++ )); do
+      [ "${done_items[i]}" = true ] && [ "${files[i]}" = "$file" ] || continue
+      specs+=("${lines[i]}:${names[i]}=\"keychain://${labels[i]}\"")
+      [ "${tracked[i]}" = true ] && rotate="${rotate:+$rotate, }${names[i]}"
+    done
+    [ ${#specs[@]} -gt 0 ] || continue
+    if rewrite_env_file "$file" "${specs[@]}"; then
+      imported=$((imported + ${#specs[@]}))
+      success "Updated $file"
+    else
+      info "Warning: could not update $file; its values are in Keychain, replace them by hand"
+    fi
+  done
+
+  success "Imported $imported value(s)"
+  info "Check with: $_KCM_SCRIPT_NAME use -s"
+  if [ -n "$rotate" ]; then
+    info "Old values stay in git history: rotate $rotate"
+  fi
+}
+
 # Function to remove secret from keychain
 remove_secret() {
   if ! command -v security >/dev/null 2>&1; then
@@ -631,6 +1113,40 @@ copy_secret() {
   fi
 }
 
+# Print the generic-password service names in the keychain search list matching REGEX.
+# Reads attributes only, so it never asks for Keychain access.
+keychain_services() {
+  local regex="$1" keychains keychain
+  keychains=$(security list-keychains 2>/dev/null | tr -d '"' | sed '/^$/d') || keychains=""
+  while IFS= read -r keychain; do
+    [ -n "$keychain" ] || continue
+    keychain=$(echo "$keychain" | xargs)
+    security dump-keychain "$keychain" 2>/dev/null | awk -v regex="$regex" '
+      BEGIN { genp=0; service="" }
+      /^keychain:/ { genp=0; service=""; next }
+      /class: "genp"/ { genp=1; next }
+      /class:/ { genp=0; service=""; next }
+      /0x00000007.*<blob>="[^"]+"/ {
+        if (genp) {
+          service=$0
+          sub(/.*<blob>="/, "", service)
+          sub(/".*/, "", service)
+        }
+        next
+      }
+      /"acct"<blob>=/ {
+        if (genp && service) {
+          if (service ~ regex) {
+            print service
+          }
+          service=""
+        }
+        next
+      }
+    ' || true
+  done <<< "$keychains"
+}
+
 # Function to list secrets matching pattern
 # NOTE: This function lists only secrets that kcm can actually access.
 # Some keychain entries may be visible in the system keychain dump but have
@@ -656,44 +1172,10 @@ list_secrets() {
   echo ""
 
   local -a candidates=()
-  local keychains=""
-  if ! keychains=$(security list-keychains 2>/dev/null | tr -d '"' | sed '/^$/d'); then
-    keychains=""
-  fi
-
-  while IFS= read -r keychain; do
-    [ -n "$keychain" ] || continue
-    keychain=$(echo "$keychain" | xargs)
-
-    while IFS= read -r service; do
-      [ -n "$service" ] || continue
-      candidates+=("$service")
-    done < <(
-      security dump-keychain "$keychain" 2>/dev/null | awk -v regex="$grep_pattern" '
-        BEGIN { genp=0; service="" }
-        /^keychain:/ { genp=0; service=""; next }
-        /class: "genp"/ { genp=1; next }
-        /class:/ { genp=0; service=""; next }
-        /0x00000007.*<blob>="[^"]+"/ {
-          if (genp) {
-            service=$0
-            sub(/.*<blob>="/, "", service)
-            sub(/".*/, "", service)
-          }
-          next
-        }
-        /"acct"<blob>=/ {
-          if (genp && service) {
-            if (service ~ regex) {
-              print service
-            }
-            service=""
-          }
-          next
-        }
-      ' || true
-    )
-  done <<< "$keychains"
+  local service
+  while IFS= read -r service; do
+    [ -n "$service" ] && candidates+=("$service")
+  done < <(keychain_services "$grep_pattern")
 
   local -a accessible=()
   if [ ${#candidates[@]} -gt 0 ]; then
@@ -768,6 +1250,10 @@ case "${1:-}" in
     shift
     install_wrapper "$@"
     ;;
+  import)
+    shift
+    import_secrets "$@"
+    ;;
   version|--version|-v)
     echo "kcm version $_KCM_VERSION"
     ;;
@@ -781,7 +1267,7 @@ case "${1:-}" in
   *)
     echo -e "${_KCM_RED}Error: Unknown command '$1'${_KCM_NC}" >&2
     echo "" >&2
-    echo "Available commands: add, remove, show, copy, ls, use, install-wrapper, version, help" >&2
+    echo "Available commands: add, remove, show, copy, ls, use, import, install-wrapper, version, help" >&2
     echo "Try '$_KCM_SCRIPT_NAME help' for more information." >&2
     exit 1
     ;;

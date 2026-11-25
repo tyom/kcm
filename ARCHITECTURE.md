@@ -93,6 +93,10 @@ Replaces the script process with the target command, ensuring:
 
 `store_secret` writes a value as hex through `security -i` on stdin, then reads it back, because `security -i` exits 0 even when a command fails. `read_secret` parses `security find-generic-password -g`, since `-w` prints hex for values with newlines.
 
+### Import
+
+`import` parses env files with `RESOLVE_REFS=false`, so `keychain://` values stay as text, and uses the line range the parser records for each assignment. It stores every picked value with `store_secret` (which reads it back) before touching any file, then rewrites each file once through a temp file in the same folder and `mv`. A failed store leaves its line as it was. There is no backup file, because it would keep the plain values on disk.
+
 ### Environment Processing
 
 Uses parallel arrays (`PROCESSED_ENV_NAMES`, `PROCESSED_ENV_VALUES`) to parse everything before exporting anything.
