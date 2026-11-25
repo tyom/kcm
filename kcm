@@ -396,15 +396,16 @@ process_env_file() {
 # Sets ENV_FILES, lowest priority first.
 discover_env_files() {
   local mode="${NODE_ENV:-development}"
-  local names=(".env.$mode.local" ".env.local" ".env.$mode" ".env")
+  local names=(".env.$mode.local" ".env.local")
   # Mode "local" would list .env.local twice
-  [ "$mode" = local ] && names=(".env.local.local" ".env.local" ".env")
+  [ "$mode" = local ] || names+=(".env.$mode")
+  names+=(".env")
   local found=()  # closest and highest priority first
   local dir="$PWD" rel="./" name root="$PWD"
 
   # Git root is the nearest folder with .git (a file in worktrees); without one, only check cwd
   while [ "$root" != "/" ] && [ ! -e "$root/.git" ]; do
-    root=$(dirname "$root")
+    root="${root%/*}"; root="${root:-/}"
   done
   [ -e "$root/.git" ] || root="$PWD"
 
@@ -413,18 +414,17 @@ discover_env_files() {
       [ -f "$dir/$name" ] && found+=("$rel$name")
     done
     [ "$dir" = "$root" ] && break
-    dir=$(dirname "$dir")
+    dir="${dir%/*}"; dir="${dir:-/}"
     if [ "$rel" = "./" ]; then rel="../"; else rel="../$rel"; fi
   done
 
-  ENV_FILES=()
   if [ ${#found[@]} -eq 0 ]; then
     info "Warning: no .env files found, proceeding without them"
     return 0
   fi
 
   local list
-  list=$(printf '%s, ' "${found[@]}")
+  printf -v list '%s, ' "${found[@]}"
   info "Loaded ${list%, }"
 
   local i
@@ -466,25 +466,24 @@ print_merged_env() {
     [ "${#name}" -gt "$width" ] && width=${#name}
   done
 
-  # Names are valid identifiers, so sorting them line by line is safe
-  for name in $(printf '%s\n' ${MERGED_NAMES[@]+"${MERGED_NAMES[@]}"} | sort); do
-    for k in "${!MERGED_NAMES[@]}"; do
-      [ "${MERGED_NAMES[$k]}" = "$name" ] || continue
-      if [ "$show_values" = false ]; then
-        printf '%-*s  %s\n' "$width" "$name" "${MERGED_SOURCES[$k]}"
-        continue
+  # Names are valid identifiers, so "NAME index" lines sort safely
+  for k in "${!MERGED_NAMES[@]}"; do
+    printf '%s %s\n' "${MERGED_NAMES[$k]}" "$k"
+  done | LC_ALL=C sort | while read -r name k; do
+    if [ "$show_values" = false ]; then
+      printf '%-*s  %s\n' "$width" "$name" "${MERGED_SOURCES[$k]}"
+      continue
+    fi
+    value="${MERGED_VALUES[$k]}"
+    if [ "$show_values" = masked ]; then
+      # From 24 chars, first and last 4 reveal at most a third of the value
+      if [ ${#value} -ge 24 ]; then
+        value="${value:0:4}…${value: -4}"
+      elif [ -n "$value" ]; then
+        value="****"
       fi
-      value="${MERGED_VALUES[$k]}"
-      if [ "$show_values" = masked ]; then
-        # From 24 chars, first and last 4 reveal at most a third of the value
-        if [ ${#value} -ge 24 ]; then
-          value="${value:0:4}…${value: -4}"
-        elif [ -n "$value" ]; then
-          value="****"
-        fi
-      fi
-      printf '%s=%s\n' "$name" "$value"
-    done
+    fi
+    printf '%s=%s\n' "$name" "$value"
   done
 }
 
@@ -538,6 +537,7 @@ use_secrets() {
     shift
   done
 
+  ENV_FILES=()
   if [ -z "$env_file" ]; then
     discover_env_files
   else
@@ -556,7 +556,6 @@ use_secrets() {
       fi
     fi
 
-    ENV_FILES=()
     if [ -f "$env_file" ]; then
       ENV_FILES=("$env_file")
     else
@@ -760,12 +759,17 @@ show_command_help() {
   show_help | awk -v cmd="$1" '/^[^ ]/ { p = 0 } /^  [a-z]/ { p = ($1 == cmd) } p'
 }
 
+# Command aliases
+case "${1:-}" in
+  rm) set -- remove "${@:2}" ;;
+  list) set -- ls "${@:2}" ;;
+esac
+
 # `kcm <command> --help` shows that command's help instead of running it
 case "${2:-}" in
   -h|--help)
-    case "$1" in rm) cmd="remove" ;; list) cmd="ls" ;; *) cmd="$1" ;; esac
     # Commands with no help section fall through to the dispatcher
-    cmd_help=$(show_command_help "$cmd")
+    cmd_help=$(show_command_help "$1")
     if [ -n "$cmd_help" ]; then echo "$cmd_help"; exit 0; fi
     ;;
 esac
@@ -776,7 +780,7 @@ case "${1:-}" in
     shift
     add_secret "$@"
     ;;
-  remove|rm)
+  remove)
     shift
     remove_secret "$@"
     ;;
@@ -788,7 +792,7 @@ case "${1:-}" in
     shift
     copy_secret "$@"
     ;;
-  ls|list)
+  ls)
     shift
     list_secrets "$@"
     ;;
