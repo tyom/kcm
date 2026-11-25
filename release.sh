@@ -29,6 +29,11 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
+if [ "$(git branch --show-current)" != main ]; then
+    echo "Run releases from main (current branch: $(git branch --show-current))"
+    exit 1
+fi
+
 if [ "$DRY_RUN" = true ]; then
     echo "DRY RUN MODE - No changes will be committed or pushed"
     echo ""
@@ -75,10 +80,11 @@ fi
 echo "Creating and pushing tag..."
 if [ "$DRY_RUN" = true ]; then
     echo "  Would create tag: v${VERSION}"
-    echo "  Would push: origin main --tags"
+    echo "  Would push: origin main refs/tags/v${VERSION}"
 else
     git tag -a "v${VERSION}" -m "Release v${VERSION}"
-    git push origin main --tags
+    # Push only this tag, even with push.followTags or a branch of the same name
+    git push --no-follow-tags origin main "refs/tags/v${VERSION}"
 fi
 
 echo ""

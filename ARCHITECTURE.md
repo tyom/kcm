@@ -6,7 +6,7 @@ Technical overview of KCM's design and implementation decisions.
 
 ### Security by Default
 
-Input validation, no `eval` or `source`, dangerous patterns blocked unless explicitly allowed.
+Input validation, no `eval` or `source`. Values are only exported, so they are never run as code.
 
 ### Developer Experience
 
@@ -40,34 +40,26 @@ The `use` command:
 
 1. Parses `.env` files line-by-line (never using `eval`)
 2. Resolves `keychain://` references by querying the keychain
-3. Validates all values against a security filter
-4. Exports variables and executes the user command via `exec`
+3. Exports variables and executes the user command via `exec`
 
 ## Security Architecture
 
-### Four Validation Layers
+### Validation
 
 1. **Key Names**: Must match `^[A-Za-z][A-Za-z0-9_]*$`
 2. **Variable Names**: Must be valid shell identifiers
-3. **Values**: Block `$()`, `` ` ``, `$`, `;`, `|`, `&`, `\` by default
-4. **Paths**: Prevent access to system files like `/etc/passwd`
+
+Values are not filtered. kcm never evaluates them, so a `$` or `;` in a value is just a character.
 
 ### Safe Parsing
 
 Environment files are parsed manually without shell interpretation:
 
 - Split on first `=` only
+- Accept an optional `export ` prefix and CRLF line endings
+- Text after a closing quote is ignored, so `KEY="value" # note` works
 - Store in arrays before exporting
-- Validate before execution
 - No code evaluation
-
-### Cleanup on Exit
-
-Signal handlers ensure:
-
-- Clipboard is cleared immediately on interruption
-- Background jobs are terminated
-- No secrets persist after exit
 
 ## Key Design Decisions
 
@@ -99,11 +91,11 @@ Replaces the script process with the target command, ensuring:
 
 ### Keychain Operations
 
-All keychain interactions go through wrapper functions that handle errors gracefully and provide consistent behavior.
+`store_secret` writes a value as hex through `security -i` on stdin, then reads it back, because `security -i` exits 0 even when a command fails. `read_secret` parses `security find-generic-password -g`, since `-w` prints hex for values with newlines.
 
 ### Environment Processing
 
-Uses parallel arrays (`PROCESSED_ENV_NAMES`, `PROCESSED_ENV_VALUES`) to validate everything before exporting anything. Atomic environment setup.
+Uses parallel arrays (`PROCESSED_ENV_NAMES`, `PROCESSED_ENV_VALUES`) to parse everything before exporting anything.
 
 ### Pattern Matching
 
@@ -117,12 +109,6 @@ Converts shell wildcards to regex and uses a two-phase filter:
 Strict mode (`set -euo pipefail`) with explicit error handling for user-facing operations. Errors include helpful messages and exit codes.
 
 ## Trade-offs
-
-### Security vs. Usability
-
-- **Strict by default**: Special characters blocked to prevent injection
-- **Escape hatch**: `--allow-unsafe` flag for legitimate use cases
-- Favors security while acknowledging real-world needs
 
 ### Simplicity vs. Features
 

@@ -28,7 +28,8 @@ unset NODE_ENV
 # Cleanup function
 cleanup() {
     # Remove test keys from keychain (silently)
-    security delete-generic-password -s "$TEST_KEY" >/dev/null 2>&1 || true
+    # Loop: a failed account test can leave two entries
+    while security delete-generic-password -s "$TEST_KEY" >/dev/null 2>&1; do :; done
     security delete-generic-password -s "${TEST_KEY}_2" >/dev/null 2>&1 || true
     security delete-generic-password -s "${TEST_KEY}_QUOTE" >/dev/null 2>&1 || true
     security delete-generic-password -s "TEST_PATTERN_ONE" >/dev/null 2>&1 || true
@@ -146,6 +147,31 @@ assert_contains "$output" "$TEST_KEY" "List shows test key"
 "$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "Remove secret successfully"
 
+# Multiline and shell-special secrets round-trip through add, show and use
+secret=$'line "1" \\ $x\nline 2'
+printf '%s' "$secret" | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
+output=$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1)
+assert_equals "$secret" "$output" "Multiline secret shown as stored"
+printf 'ML=keychain://%s\n' "$TEST_KEY" > "$TEST_DIR/ml.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/ml.env" -- bash -c 'printf "%s" "$ML"' 2>/dev/null)
+assert_equals "$secret" "$output" "Multiline secret resolved by use"
+
+# Updating an entry saved under another account replaces it instead of adding a second one
+"$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1
+security add-generic-password -s "$TEST_KEY" -a "kcm-test-other" -w old >/dev/null 2>&1
+echo "new" | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 0 "$exit_code" "Update entry with another account"
+assert_equals "new" "$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1)" "Entry with another account updated"
+security find-generic-password -s "$TEST_KEY" -a "$USER" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 44 "$exit_code" "No second entry created"
+"$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1
+
+# Interactive add keeps surrounding spaces
+"$SCRIPT_PATH" add "$TEST_KEY" >/dev/null 2>&1 <<< "  spaced  "
+output=$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1)
+assert_equals "  spaced  " "$output" "Interactive add keeps surrounding spaces"
+"$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1
+
 # Test 7: Show non-existent secret
 output=$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 1 "$exit_code" "Show non-existent secret fails"
@@ -254,26 +280,17 @@ echo
 echo "Test Group: Security Features"
 echo "-----------------------------"
 
-# Test 16: Dangerous characters without --allow-unsafe
+# Values are exported, never evaluated, so shell characters pass through literally
 cat > "$TEST_ENV" << 'EOF'
-DANGEROUS_VAR=$HOME
-BACKTICK_VAR=`echo bad`
-SEMICOLON_VAR=value;echo bad
-PIPE_VAR=value|echo bad
+DB=postgres://u:p@h/db?sslmode=require&pool=5
+SUBST=$(echo bad);`echo bad`|x
 EOF
 
-output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "TEST"' 2>&1) && exit_code=$? || exit_code=$?
-assert_exit_code 0 "$exit_code" "Command runs despite dangerous vars"
-assert_contains "$output" "potentially dangerous" "Warning about dangerous characters"
+output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'printf "%s\n" "$DB" "$SUBST"' 2>/dev/null)
+assert_equals "$(printf '%s\n' 'postgres://u:p@h/db?sslmode=require&pool=5' '$(echo bad);`echo bad`|x')" "$output" "Shell characters kept literally, never run"
 
-# Test 17: Allow unsafe flag
-output=$("$SCRIPT_PATH" use --allow-unsafe --env-file "$TEST_ENV" -- bash -c 'echo "$DANGEROUS_VAR"' 2>&1) && exit_code=$? || exit_code=$?
-assert_contains "$output" "\$HOME" "Dangerous var allowed with flag"
-
-# Test 18: Path validation
-output=$("$SCRIPT_PATH" use --env-file /etc/passwd -- echo test 2>&1) && exit_code=$? || exit_code=$?
-assert_exit_code 1 "$exit_code" "Reject system file as env-file"
-assert_contains "$output" "Security error" "Security error message shown"
+output=$("$SCRIPT_PATH" use --allow-unsafe --env-file "$TEST_ENV" -- bash -c 'echo "$DB"' 2>/dev/null)
+assert_equals "postgres://u:p@h/db?sslmode=require&pool=5" "$output" "--allow-unsafe still accepted"
 
 echo
 echo "Test Group: Edge Cases"
@@ -305,6 +322,41 @@ assert_equals "valid_value" "$output" "Valid var processed despite malformed ent
 # Test 22: Command with arguments
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo $1 $2' -- "arg1" "arg2" 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "arg1 arg2" "$output" "Arguments passed correctly"
+
+# A comment after a closing quote must not start a multiline value
+printf 'A="x" # note\nB=after\n' > "$TEST_ENV"
+output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$A|$B"' 2>/dev/null)
+assert_equals "x|after" "$output" "Comment after quoted value ignored"
+
+# A quote inside the trailing comment does not move the closing quote
+printf 'A="x" # "note"\n' > "$TEST_ENV"
+output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$A"' 2>/dev/null)
+assert_equals "x" "$output" "Quote in trailing comment ignored"
+
+# A comment after a multiline value closes it
+printf 'A="one\ntwo" # note\nB=after\n' > "$TEST_ENV"
+output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'printf "%s|%s" "$A" "$B"' 2>/dev/null)
+assert_equals "$(printf 'one\ntwo|after')" "$output" "Comment after multiline value ignored"
+
+# CRLF line endings
+printf 'A="x"\r\nB=after\r\n' > "$TEST_ENV"
+output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$A|$B"' 2>/dev/null)
+assert_equals "x|after" "$output" "CRLF line endings handled"
+
+# export prefix
+printf 'export FOO=bar\n' > "$TEST_ENV"
+output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$FOO"' 2>/dev/null)
+assert_equals "bar" "$output" "export prefix accepted"
+
+# Missing keychain entry warns and keeps the placeholder
+printf 'GONE=keychain://KCM_TEST_MISSING_%s\n' "$$" > "$TEST_ENV"
+output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- true 2>&1)
+assert_contains "$output" "KCM_TEST_MISSING_$$ not found" "Warns about missing keychain entry"
+
+# -e without a file name
+output=$("$SCRIPT_PATH" use -e 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "-e without argument fails"
+assert_contains "$output" "requires an argument" "-e without argument shows usage error"
 
 echo
 echo "Test Group: Env File Discovery"

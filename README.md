@@ -55,6 +55,8 @@ echo "secret-value" | kcm add TOKEN -
 cat ~/secret-file.txt | kcm add AWS_SECRET -
 ```
 
+Multiline secrets such as PEM keys work through stdin. Adding a name that already exists updates its value.
+
 After adding, you'll get a `.env` entry like:
 
 ```
@@ -117,7 +119,7 @@ Add `--show-values` (`-s`) to check the resolved values without exposing them. V
 # Show a secret value
 kcm show DATABASE_URL
 
-# Copy to clipboard (auto-clears after 45 seconds)
+# Copy to clipboard (cleared after 45 seconds, unless you copied something else since)
 kcm copy API_KEY
 
 # List all accessible secrets
@@ -149,11 +151,20 @@ PORT=3000
 NODE_ENV=development
 ```
 
-When you run `kcm use -- <command>`, all `keychain://` references are automatically resolved from the Keychain.
+When you run `kcm use -- <command>`, all `keychain://` references are resolved from the Keychain. If a secret is missing, kcm prints a warning and passes the `keychain://` text through unchanged.
+
+Parsing rules:
+
+- Values are passed to the command as plain text. kcm never runs them through a shell, so `$`, `&` or `;` in a value stay as they are.
+- Single or double quotes around a value are removed. A quoted value can span several lines.
+- Text after the closing quote is ignored, so `API_KEY="keychain://API_KEY" # staging` works. In an unquoted value, a `#` is part of the value.
+- An `export ` prefix is allowed: `export PORT=3000`.
+- Lines starting with `#`, blank lines and lines without a valid variable name are skipped.
+- Windows (CRLF) line endings are fine.
 
 ## Security
 
-Secrets stored in macOS Keychain with OS-level encryption. Auto-clearing clipboard, input validation, safe parsing.
+Secrets stay in the macOS Keychain, which encrypts them. `kcm add` passes the value to `security` on stdin, so it doesn't show up in `ps` (values over about 2 KB are the exception). `.env` values are never run as code.
 
 **See [SECURITY.md](SECURITY.md) for full security policy, best practices, and limitations.**
 
@@ -212,7 +223,7 @@ kcm use -- npm start
 ## Requirements
 
 - macOS (uses native `security` command)
-- Bash 4.0 or higher
+- Bash 3.2 or higher (the version macOS ships)
 - Access to macOS Keychain
 
 ## Important Notes
