@@ -51,3 +51,19 @@ rm "$tmp/origin/hooks/pre-receive"
 ./release.sh 99.0.0 > "$tmp/log" 2>&1
 test "$(git --git-dir="$tmp/origin" rev-parse --verify refs/tags/v99.0.0)" = "$tag"
 test "$(git --git-dir="$tmp/origin" rev-parse main)" = "$(git rev-parse HEAD)"
+
+# Refuse to reuse a tag that points at another commit with the same version.
+echo later > later
+git add later
+git commit -qm later
+head=$(git rev-parse HEAD)
+remote_tag=$(git --git-dir="$tmp/origin" rev-parse refs/tags/v99.0.0)
+if ./release.sh 99.0.0 > "$tmp/log" 2>&1; then
+  echo "Release reused a tag on another commit" >&2
+  exit 1
+fi
+grep -q "already exists for a different commit" "$tmp/log"
+test "$(git rev-parse HEAD)" = "$head"
+git diff --quiet -- kcm
+test "$(git --git-dir="$tmp/origin" rev-parse refs/tags/v99.0.0)" = "$remote_tag"
+test "$(git --git-dir="$tmp/origin" rev-parse main)" != "$head"

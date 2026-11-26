@@ -44,6 +44,10 @@ jobs:
               --notes "Install via Homebrew: \`brew install tyom/tap/kcm\`" --generate-notes
           fi
           gh release download "$tag" --pattern kcm --output - | cmp - kcm
+          # An interrupted create leaves a draft; publish it before Homebrew points at it.
+          if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true ]; then
+            gh release edit "$tag" --draft=false
+          fi
 
   homebrew:
     needs: release
@@ -62,9 +66,16 @@ jobs:
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/kcm"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/tyom/homebrew-tap.git" tap
           installed=$(sed -nE 's/^  version "([^"]+)".*/\1/p' tap/Formula/kcm.rb)
-          if [ "$installed" != "$version" ] && git merge-base --is-ancestor "$GITHUB_SHA" "refs/tags/v$installed" 2>/dev/null; then
-            echo "The tap already has a later release, $installed."
-            exit 0
+          if [ "$installed" != "$version" ]; then
+            # The checkout may predate the tap's tag, so fetch it. Only a definite "not an ancestor" may update.
+            git fetch --quiet origin "+refs/tags/v$installed:refs/tags/v$installed"
+            status=0
+            git merge-base --is-ancestor "$GITHUB_SHA" "refs/tags/v$installed" || status=$?
+            case "$status" in
+              0) echo "The tap already has a later release, $installed."; exit 0 ;;
+              1) ;;
+              *) echo "Cannot compare with the tap's release, $installed." >&2; exit 1 ;;
+            esac
           fi
           cd tap
           f=Formula/kcm.rb

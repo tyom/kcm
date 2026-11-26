@@ -142,7 +142,8 @@ COMMANDS:
 ENVIRONMENT VARIABLE FORMAT:
   keychain://LABEL - Retrieved from macOS Keychain
 
-  If a secret cannot be resolved, kcm warns and keeps the original value.
+  If a secret is missing or unreadable, kcm warns and keeps the original value.
+  If the name matches several Keychain entries ambiguously, kcm stops.
 
 EOF
 }

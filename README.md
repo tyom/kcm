@@ -58,7 +58,7 @@ echo "secret-value" | kcm add TOKEN -
 cat ~/secret-file.txt | kcm add AWS_SECRET -
 ```
 
-Multiline secrets such as PEM keys work through stdin. Adding a name that already exists updates its value.
+Multiline secrets such as PEM keys work through stdin. Adding a name that already exists updates its value. If the name matches several Keychain entries ambiguously, `add` refuses to change any of them.
 
 After adding, you'll get a `.env` entry like:
 
@@ -223,7 +223,7 @@ PORT=3000
 NODE_ENV=development
 ```
 
-When you run `kcm use -- <command>`, all `keychain://` references are resolved from the Keychain. If a secret is missing, kcm prints a warning and passes the `keychain://` text through unchanged.
+When you run `kcm use -- <command>`, all `keychain://` references are resolved from the Keychain. If a secret is missing or unreadable, kcm prints a warning and passes the `keychain://` text through unchanged. If a name matches several Keychain entries ambiguously, kcm stops without running the command.
 
 Parsing rules:
 
