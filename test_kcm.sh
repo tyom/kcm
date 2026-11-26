@@ -37,7 +37,7 @@ cleanup() {
         while security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1; do :; done
     done
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT HINT ACCENT; do
+    for suffix in BINARY RACE_KEY API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT HINT ACCENT; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -299,6 +299,17 @@ printf 'ML=keychain://%s\n' "$TEST_KEY" > "$TEST_DIR/ml.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/ml.env" -- bash -c 'printf "%s" "$ML"' 2>/dev/null)
 assert_equals "$secret" "$output" "Multiline secret resolved by use"
 
+# A zero byte must be rejected before it can replace an existing text credential.
+printf 'A\0B' | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Add rejects a zero byte on stdin"
+assert_equals "$secret" "$("$SCRIPT_PATH" show "$TEST_KEY")" "Rejected binary input preserves the credential"
+
+# Keychain can hold binary items created by other tools.
+security add-generic-password -s "${TEST_KEY}_BINARY" -a "$USER" -X 410042 || exit 1
+output=$("$SCRIPT_PATH" show "${TEST_KEY}_BINARY" 2>/dev/null) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Show rejects a binary Keychain value"
+assert_equals "" "$output" "Show prints no partial binary credential"
+
 # show | add keeps trailing newlines, so it can retag an entry without changing its value
 printf 'abc\n\n' | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
 "$SCRIPT_PATH" show "$TEST_KEY" | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
@@ -495,6 +506,12 @@ printf 'BEFORE=yes\nTOKEN="unfinished\nAFTER=no\n' > "$TEST_DIR/broken.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/broken.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
 assert_exit_code 1 "$exit_code" "Unclosed quote stops the command"
 assert_contains "$output" "$TEST_DIR/broken.env:2" "Unclosed quote reports its opening line"
+
+# A zero byte in an env file must not disappear on the way to a command or import.
+printf 'TOKEN=A\0B\n' > "$TEST_DIR/binary.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/binary.env" -- printenv TOKEN 2>/dev/null) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Rejects a binary env file"
+assert_equals "" "$output" "Does not pass a shortened env value to the command"
 
 # Test 22: Command with arguments
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo $1 $2' -- "arg1" "arg2" 2>&1) && exit_code=$? || exit_code=$?
@@ -742,6 +759,13 @@ assert_equals "mine" "$(cat "$WRAP/bin/other")" "Existing file left unchanged"
 output=$(cd "$WRAP" && "$SCRIPT_PATH" install-wrapper ../outside/with-env 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 1 "$exit_code" "Rejects a location outside the git root"
 [ ! -e "$TEST_DIR/outside/with-env" ] && pass "Writes nothing outside the git root" || fail "Writes nothing outside the git root"
+
+# Wrapper installation must resolve the parent before creating nested folders.
+mkdir -p "$TEST_DIR/other-project"
+ln -s "$TEST_DIR/other-project" "$WRAP/linked-project"
+(cd "$WRAP" && "$SCRIPT_PATH" install-wrapper linked-project/bin/env >/dev/null 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Refuses to install a wrapper in another project through a link"
+if [ -e "$TEST_DIR/other-project/bin" ]; then fail "Created an external directory"; else pass "Leaves the other project untouched"; fi
 echo
 echo "Test Group: Import"
 echo "------------------"
@@ -840,12 +864,15 @@ assert_equals "local-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_API_KEY" 2>&1)" 
 assert_equals "shared-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_RENAMED" 2>&1)" "Import stores the clashing .env value under the new name"
 assert_equals "${TEST_KEY}_API_KEY=\"keychain://${TEST_KEY}_RENAMED\"" "$(cat "$IG/.env")" "Import points .env at the renamed entry"
 
-# A symlinked env file keeps its target's permissions when rewritten
+# Import refuses a linked source before storing any values.
 printf '%s_LINK_KEY=sk-link-1\n' "$TEST_KEY" > "$IMP/real.env"
-chmod 600 "$IMP/real.env"
 ln -s real.env "$IMP/link.env"
-(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import -e link.env >/dev/null 2>&1)
-assert_equals "600" "$(/usr/bin/stat -f %Lp "$IMP/link.env")" "Import keeps a symlinked file's permissions"
+(cd "$IMP" && printf '\ny\n' | "$SCRIPT_PATH" import -e link.env >/dev/null 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Import refuses a symlinked source"
+if [ -L "$IMP/link.env" ]; then pass "Import keeps the source link"; else fail "Import replaced the source link"; fi
+assert_equals "${TEST_KEY}_LINK_KEY=sk-link-1" "$(cat "$IMP/real.env")" "Import preserves the linked source"
+"$SCRIPT_PATH" show "${TEST_KEY}_LINK_KEY" >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Import stores nothing for a linked source"
 
 # A value ending in a newline still reads back, so its line is replaced
 printf '%s_NL_KEY="abc\n\n"\n' "$TEST_KEY" > "$IMP/nl.env"
@@ -890,6 +917,31 @@ printf '%s_REF_KEY=sk-ref-1\n' "$TEST_KEY" > "$IMP/ref.env"
   | "$SCRIPT_PATH" import -e ref.env >/dev/null 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "${TEST_KEY}_REF_KEY=sk-ref-1" "$(cat "$IMP/ref.env")" "Import keeps the plain value when the Keychain value changed"
 assert_exit_code 1 "$exit_code" "Import exits 1 when a kept Keychain value changed"
+
+# A credential can appear or rotate while import waits for final confirmation.
+race_name="${TEST_KEY}_RACE_KEY"
+for before in absent existing; do
+    if [ "$before" = existing ]; then
+        printf 'old-value' | "$SCRIPT_PATH" add "$race_name" - >/dev/null 2>&1 || exit 1
+    fi
+    printf '%s=file-value\n' "$race_name" > "$IMP/race.env"
+    exec 3> "$IMP/race.log"
+    {
+        printf '\n'
+        if [ "$before" = existing ]; then printf 'o\n'; fi
+        for (( wait_tick=0; wait_tick<200; wait_tick++ )); do
+            grep -q "→ keychain://$race_name" "$IMP/race.log" && break
+            sleep 0.05
+        done
+        if [ "$wait_tick" -eq 200 ]; then exit 1; fi
+        printf 'newer-value' | "$SCRIPT_PATH" add "$race_name" - >/dev/null 2>&1 || exit 1
+        printf 'y\n'
+    } | "$SCRIPT_PATH" import -e "$IMP/race.env" >/dev/null 2>&3 && exit_code=0 || exit_code=$?
+    exec 3>&-
+    assert_exit_code 1 "$exit_code" "Import rechecks a previously $before label"
+    assert_equals newer-value "$("$SCRIPT_PATH" show "$race_name")" "Import preserves the concurrent $before-label update"
+    assert_equals "$race_name=file-value" "$(cat "$IMP/race.env")" "Import keeps the file value after a $before-label conflict"
+done
 
 # Two picked values overwriting one label: only the file whose value won gets the reference
 DUP="$TEST_DIR/dup"
@@ -955,6 +1007,17 @@ echo "----------------------------"
 echo
 echo "Test Group: Export"
 echo "------------------"
+
+# An explicit missing input cannot produce a successful empty export.
+"$SCRIPT_PATH" export -e "$TEST_DIR/missing-source.env" -o "$TEST_DIR/shared.env" >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Export fails on a missing explicit input"
+if [ -e "$TEST_DIR/shared.env" ]; then fail "Created an empty export"; else pass "Missing input leaves no export file"; fi
+
+# A literal reference in a shell value would mean something else when read back.
+printf 'FIRST=ok\nLITERAL=file\n' > "$TEST_DIR/literal.env"
+output=$(LITERAL=keychain://literal "$SCRIPT_PATH" export -e "$TEST_DIR/literal.env" 2>/dev/null | cat) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Export refuses a value that would become a Keychain reference"
+assert_equals "" "$output" "An unrepresentable reference produces no partial export"
 
 # A reference, a multiline value, a value with ' and a literal \n that dotenv would expand in "..."
 printf 'exported-secret' | "$SCRIPT_PATH" add "${TEST_KEY}_EXPORT" - >/dev/null 2>&1
