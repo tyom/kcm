@@ -59,6 +59,14 @@ echo "secret-value" | kcm add TOKEN -
 cat ~/secret-file.txt | kcm add AWS_SECRET -
 ```
 
+Add a hint with `-c` to remember what a secret is for or where it came from:
+
+```bash
+kcm add STRIPE_KEY -c "Test mode key, from the Stripe dashboard"
+```
+
+`kcm ls` shows the hint next to the name, and Keychain Access shows it as the comment. Adding the name again without `-c` updates the value and keeps the hint. A hint can be up to 200 characters. It is not encrypted, so don't put anything secret in it.
+
 Multiline secrets such as PEM keys work through stdin. Adding a name that already exists updates its value. If the name matches several Keychain entries ambiguously, `add` refuses to change any of them.
 
 After adding, you'll get a `.env` entry like:
@@ -260,7 +268,7 @@ Parsing rules:
 
 Secrets stay in the macOS Keychain, which encrypts them. `kcm add` passes the value to `security` on stdin, so it doesn't show up in `ps` (values over about 2 KB are the exception). `.env` values are never run as code.
 
-In Keychain Access, kcm's entries show the kind "kcm secret". The comment says where a value came from: "Added by kcm", or "Imported by kcm from ~/Code/app/.env.local". These details are not encrypted, unlike the value. Entries from older versions of kcm get them the next time you add that name, or import a different value under it. An import that finds the same value only writes the reference and leaves the entry as it is.
+In Keychain Access, kcm's entries show the kind "kcm secret". The comment says where a value came from: "Added by kcm", "Imported by kcm from ~/Code/app/.env.local", or the hint you gave with `add -c`. These details are not encrypted, unlike the value. Entries from older versions of kcm get them the next time you add that name, or import a different value under it. An import that finds the same value only writes the reference and leaves the entry as it is.
 
 **See [SECURITY.md](SECURITY.md) for full security policy, best practices, and limitations.**
 

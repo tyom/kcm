@@ -37,7 +37,7 @@ cleanup() {
         while security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1; do :; done
     done
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT; do
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT HINT; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -150,6 +150,30 @@ attrs=$(security find-generic-password -s "$TEST_KEY" 2>&1)
 assert_contains "$attrs" '"desc"<blob>="kcm secret"' "Added secret has kind 'kcm secret'"
 assert_contains "$attrs" '"crtr"<uint32>="kcm "' "Added secret has creator code 'kcm '"
 assert_contains "$attrs" '"icmt"<blob>="Added by kcm"' "Added secret has a comment"
+
+# -c stores a hint as the comment, before or after the -
+echo "hinted" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Stripe test key from the dashboard" >/dev/null 2>&1
+attrs=$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)
+assert_contains "$attrs" '"icmt"<blob>="Stripe test key from the dashboard"' "add -c stores the hint as the comment"
+
+# A new value without -c keeps the hint
+echo "hinted2" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - >/dev/null 2>&1
+attrs=$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)
+assert_contains "$attrs" '"icmt"<blob>="Stripe test key from the dashboard"' "Re-adding without -c keeps the hint"
+assert_equals "hinted2" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "Re-adding without -c still updates the value"
+
+# A long hint would push the value off stdin and onto the argument list
+long_hint=$(head -c 201 /dev/zero | tr '\0' 'h')
+output=$(echo "hinted3" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "$long_hint" 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "add -c refuses a hint over 200 characters"
+assert_equals "hinted2" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A refused hint leaves the value alone"
+
+# ls shows hints next to names, but not kcm's own comments
+output=$("$SCRIPT_PATH" ls "${TEST_KEY}*" 2>&1 | strip_ansi | tr -s ' ')
+assert_contains "$output" "${TEST_KEY}_HINT Stripe test key from the dashboard" "ls shows the hint"
+assert_not_contains "$output" "Added by kcm" "ls hides kcm's own comment"
+echo "hinted4" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "clé d'été" >/dev/null 2>&1
+assert_contains "$("$SCRIPT_PATH" ls "${TEST_KEY}_HINT" 2>&1 | strip_ansi | tr -s ' ')" "${TEST_KEY}_HINT clé d'été" "ls shows a hint with accented letters"
 
 # Test 4: Show secret
 output=$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1) && exit_code=$? || exit_code=$?

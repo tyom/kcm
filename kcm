@@ -45,17 +45,21 @@ USAGE:
   $_KCM_SCRIPT_NAME <command> [options]
 
 COMMANDS:
-  add KEY_NAME
+  add KEY_NAME [-] [-c COMMENT]
     Add a secret to Keychain and output the .env entry
 
     Options:
       KEY_NAME          - Interactive mode (prompts for value)
       KEY_NAME -        - Read value from stdin
+      -c, --comment COMMENT - A hint shown by ls and in Keychain Access (up to 200
+                              characters, stored unencrypted). Kept when you add
+                              the name again without -c.
 
     Examples:
       kcm add API_KEY      # Prompts for value
       echo "secret" | kcm add TOKEN -
       cat ~/secret.txt | kcm add AWS_KEY -
+      kcm add STRIPE_KEY -c "Test mode key, from the Stripe dashboard"
 
   remove KEY_NAME
     Remove a secret from Keychain
@@ -77,6 +81,7 @@ COMMANDS:
 
   ls [pattern]
     List kcm's secrets in Keychain matching pattern (supports wildcards).
+    Shows the comment given with 'add -c' next to each name.
     Other apps' entries are hidden. Untagged entries that look like ones an
     older kcm added (your account, a valid key name) are listed separately.
 
@@ -171,10 +176,30 @@ add_secret() {
     error_exit "This command requires macOS with the 'security' command"
   fi
 
-  if [ $# -lt 1 ]; then
+  local KEY_NAME="" SECRET_VALUE="" from_stdin=false hint=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -c|--comment)
+        [ -n "${2:-}" ] || error_exit "-c/--comment requires an argument"
+        hint="$2"
+        shift 2
+        ;;
+      -)
+        from_stdin=true
+        shift
+        ;;
+      *)
+        [ -z "$KEY_NAME" ] || error_exit "Inline values are not supported. Use interactive input or pipe via '-'"
+        KEY_NAME="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$KEY_NAME" ]; then
     echo -e "${_KCM_RED}Error: KEY_NAME is required${_KCM_NC}" >&2
     echo "" >&2
-    echo "Usage: $_KCM_SCRIPT_NAME add KEY_NAME" >&2
+    echo "Usage: $_KCM_SCRIPT_NAME add KEY_NAME [-] [-c COMMENT]" >&2
     echo "" >&2
     echo "Examples:" >&2
     echo "  $_KCM_SCRIPT_NAME add API_KEY                    # Interactive" >&2
@@ -182,8 +207,10 @@ add_secret() {
     exit 1
   fi
 
-  local KEY_NAME="$1"
-  local SECRET_VALUE=""
+  # security -i takes about 4 KB per line: a long comment would push the value onto the argument list
+  if [ ${#hint} -gt 200 ]; then
+    error_exit "Comment is ${#hint} characters, the limit is 200"
+  fi
 
   # Validate key name (alphanumeric and underscore only)
   if ! [[ "$KEY_NAME" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]]; then
@@ -191,7 +218,7 @@ add_secret() {
   fi
 
   # Get the secret value
-  if [ $# -eq 1 ]; then
+  if [ "$from_stdin" = false ]; then
     # Interactive mode - prompt for value
     info "Enter secret value for $KEY_NAME (input will be hidden):"
     echo -e "${_KCM_GREY}For long secrets (>1000 chars), use: ${_KCM_GREEN}pbpaste | $_KCM_SCRIPT_NAME add $KEY_NAME -${_KCM_NC}" >&2
@@ -201,8 +228,7 @@ add_secret() {
     if [ -z "$SECRET_VALUE" ]; then
       error_exit "Secret value cannot be empty"
     fi
-  elif [ "$2" = "-" ]; then
-    # Read from stdin
+  else
     # Strip only the one newline echo or show adds; the x keeps any others
     SECRET_VALUE=$(cat; printf x)
     SECRET_VALUE="${SECRET_VALUE%x}"
@@ -211,11 +237,9 @@ add_secret() {
     if [ -z "$SECRET_VALUE" ]; then
       error_exit "No input received from stdin"
     fi
-  else
-    error_exit "Inline values are not supported. Use interactive input or pipe via '-'"
   fi
 
-  if store_secret "$KEY_NAME" "$SECRET_VALUE"; then
+  if store_secret "$KEY_NAME" "$SECRET_VALUE" "" "$hint"; then
     success "Secret added to Keychain"
 
     # Output the .env line
@@ -240,28 +264,34 @@ security_quote() {
   printf '"%s"' "${s//\"/\\\"}"
 }
 
-# Store a secret, creating or updating it in place, with an optional COMMENT.
+# Store a secret, creating or updating it in place. COMMENT is kcm's own note; HINT is
+# the user's and replaces any comment. Without HINT, an existing hint is kept.
 # The value goes in as hex on stdin so it never shows in the process list.
 # Kind "kcm secret" and creator "kcm " mark kcm's entries; these attributes are not encrypted.
 store_secret() {
-  local name="$1" value="$2" comment="${3:-Added by kcm}" account hex cmd got
+  local name="$1" value="$2" comment="${3:-Added by kcm}" hint="${4:-}" account hex cmd got old
   local update=() target=() status keychain_arg=""
   if select_keychain_item "$name"; then
     account="$_KCM_ITEM_ACCOUNT"
     target=("$_KCM_ITEM_KEYCHAIN")
     update=(-U)
     keychain_arg=" $(security_quote "$_KCM_ITEM_KEYCHAIN")"
+    # A hint someone wrote outlives a new value; kcm's own comments are replaced
+    if old=$(item_comment "$name") && [ -n "$old" ] && [[ "$old" != "Added by kcm" && "$old" != "Imported by kcm"* ]]; then
+      comment="$old"
+    fi
   else
     status=$?
     [ "$status" -eq 44 ] || return 1
     account="$USER"
   fi
+  if [ -n "$hint" ]; then comment="$hint"; fi
   hex=$(printf '%s' "$value" | xxd -p | tr -d '\n')
   cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
   # security -i silently truncates lines over 4095 bytes. Drop the source path before
   # giving up on stdin, so the metadata never pushes a value onto argv.
-  if [ ${#cmd} -ge 4096 ] && [[ "$comment" == *" from "* ]]; then
-    comment="${comment%% from *}"
+  if [ ${#cmd} -ge 4096 ] && [[ "$comment" == "Imported by kcm from "* ]]; then
+    comment="Imported by kcm"
     cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
   fi
   if [ ${#cmd} -lt 4096 ]; then
@@ -284,12 +314,25 @@ read_secret() {
   local out
   select_keychain_item "$1" || return $?
   out=$(security find-generic-password -s "$1" -a "$_KCM_ITEM_ACCOUNT" -g "$_KCM_ITEM_KEYCHAIN" 2>&1 >/dev/null) || return 1
-  out=$(sed -n 's/^password: //p' <<< "$out")
+  decode_security_value "$(sed -n 's/^password: //p' <<< "$out")"
+}
+
+# Print a value as security shows it: "text", or 0x<hex>  "<escaped>" when it has
+# a non-printable byte. Fails on anything else, such as <NULL>.
+decode_security_value() {
+  local out="$1"
   case "$out" in
     0x*) out="${out%% *}"; xxd -r -p <<< "${out#0x}" ;;
     \"*\") out="${out#\"}"; printf '%s' "${out%\"}" ;;
     *) return 1 ;;
   esac
+}
+
+# Print the comment of the item select_keychain_item chose. Attributes only, so no Keychain prompt.
+item_comment() {
+  local out
+  out=$(security find-generic-password -s "$1" -a "$_KCM_ITEM_ACCOUNT" "$_KCM_ITEM_KEYCHAIN" 2>/dev/null) || return 1
+  decode_security_value "$(sed -n 's/^ *"icmt"<blob>=//p' <<< "$out")"
 }
 
 # Choose the same tagged or legacy entry as ls. An untagged entry under another account
@@ -1040,7 +1083,7 @@ import_secrets() {
   local -a ref_names=() ref_files=() ref_whys=() ref_marks=() ref_tints=()
   local file idx value why state tick tint is_tracked label existing n=0 m=0 in_keychain sum
   # One attribute dump instead of a lookup per variable
-  in_keychain=$'\n'"$(keychain_services '.*' | cut -d' ' -f2- | LC_ALL=C sort -u)"$'\n'
+  in_keychain=$'\n'"$(keychain_services '.*' | cut -d' ' -f2- | cut -f1 | LC_ALL=C sort -u)"$'\n'
   for file in "${_KCM_ENV_FILES[@]}"; do
     is_tracked=false
     git -C "$(dirname "$file")" ls-files --error-unmatch -- "$(basename "$file")" >/dev/null 2>&1 && is_tracked=true
@@ -1403,7 +1446,7 @@ copy_secret() {
   fi
 }
 
-# Print "<origin> <service>" for each generic password in the keychain search list whose
+# Print "<origin> <service>", then a tab and the hint if kcm's entry has one, for each generic password in the keychain search list whose
 # service matches REGEX. origin is kcm (creator "kcm "), legacy (untagged, as older kcm
 # versions wrote them: no creator or kind, account $USER, a valid key name) or other.
 # Reads attributes only, so it never asks for Keychain access.
@@ -1431,7 +1474,9 @@ keychain_services() {
           if (crtr == "kcm ") origin = "kcm"
           else if (crtr == "<NULL>" && desc == "<NULL>" && acct == user && svc ~ /^[A-Za-z][A-Za-z0-9_]*$/) origin = "legacy"
           else origin = "other"
-          if (ENVIRON["KCM_LABEL"] == "") print origin " " svc
+          # A hint follows one tab, or two when security printed it as hex
+          if (origin != "kcm" || cmt == "Added by kcm" || cmt ~ /^Imported by kcm/) cmt = ""
+          if (ENVIRON["KCM_LABEL"] == "") print origin " " svc (cmt == "" ? "" : "\t" cmt)
           else if (svc == ENVIRON["KCM_LABEL"]) {
             if (origin == "kcm") rank = 3
             else if (origin == "legacy") rank = 2
@@ -1442,13 +1487,19 @@ keychain_services() {
             print rank "\t=" acct "\t" ENVIRON["KCM_CHAIN"]
           }
         }
-        genp = 0; svc = ""; crtr = ""; desc = ""; acct = ""; plain_acct = 0
+        genp = 0; svc = ""; crtr = ""; desc = ""; acct = ""; plain_acct = 0; cmt = ""
       }
       /^keychain:/ { flush(); next }
       /^class:/ { genp = ($0 ~ /"genp"/); next }
       /^ *"svce"<blob>=/ { svc = val($0); next }
       /^ *"crtr"<uint32>=/ { crtr = val($0); next }
       /^ *"desc"<blob>=/ { desc = val($0); next }
+      /^ *"icmt"<blob>=/ {
+        cmt = val($0)
+        if (cmt == "<NULL>") cmt = ""
+        else if ($0 ~ /=0x[0-9A-F]+ /) { sub(/ .*/, "", cmt); cmt = "\t" substr(cmt, 3) }
+        next
+      }
       /^ *"acct"<blob>=/ { plain_acct = ($0 ~ /=".*"$/); acct = val($0); next }
       END { flush() }
     ' || return 1
@@ -1477,14 +1528,23 @@ list_secrets() {
 
   # Other apps' entries are left out
   local -a ours=() legacy=()
-  local origin service services
+  local origin service services hint width=0
+  local -a hints=()
   # One line per service; on a name clash kcm sorts before legacy and other, so it wins.
   # Captured first: < <(...) would hide a keychain that failed to dump.
   services=$(keychain_services "$grep_pattern" | LC_ALL=C sort -k2,2 -k1,1 | awk '!seen[$2]++') \
     || error_exit "Could not read every keychain in the search list"
-  while read -r origin service; do
+  while IFS=' ' read -r origin service; do
+    hint=""
+    if [[ "$service" == *$'\t'* ]]; then
+      hint="${service#*$'\t'}"
+      service="${service%%$'\t'*}"
+      # A second tab marks hex, which security prints for non-ASCII text
+      if [[ "$hint" == $'\t'* ]]; then hint=$(xxd -r -p <<< "${hint#$'\t'}"); fi
+      if [ ${#service} -gt "$width" ]; then width=${#service}; fi
+    fi
     case "$origin" in
-      kcm) ours+=("$service") ;;
+      kcm) ours+=("$service"); hints+=("${hint//$'\n'/ }") ;;
       legacy) legacy+=("$service") ;;
     esac
   done <<< "$services"
@@ -1493,8 +1553,13 @@ list_secrets() {
     echo "  No secrets found matching pattern '$pattern'"
     return 0
   fi
-  for service in ${ours[@]+"${ours[@]}"}; do
-    echo "  • $service"
+  local i
+  for i in ${ours[@]+"${!ours[@]}"}; do
+    if [ -n "${hints[$i]}" ]; then
+      printf '  • %-*s  %b%s%b\n' "$width" "${ours[$i]}" "$_KCM_GREY" "${hints[$i]}" "$_KCM_NC"
+    else
+      echo "  • ${ours[$i]}"
+    fi
   done
   if [ ${#legacy[@]} -gt 0 ]; then
     [ ${#ours[@]} -gt 0 ] && echo ""
