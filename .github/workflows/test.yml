@@ -18,4 +18,6 @@ jobs:
         run: chmod +x test_kcm.sh
 
       - name: Run tests
-        run: ./test_kcm.sh
+        run: |
+          ./test_kcm.sh
+          ./test_release.sh

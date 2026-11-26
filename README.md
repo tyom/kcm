@@ -8,6 +8,9 @@ A secure command-line utility for managing secrets in macOS Keychain with seamle
 
 - **Secure Storage**: Store sensitive data in macOS Keychain instead of plain text files
 - **Environment Integration**: Seamlessly resolve `keychain://` placeholders in `.env` files
+- **Env File Discovery**: Find and merge `.env` files from the current folder up to the git root. Variables already in your environment win
+- **Import**: Move plain values from `.env` files into Keychain and replace them with `keychain://` references
+- **Inspection**: Run `kcm use` without a command to see which variables would load and where each comes from
 - **Clipboard Management**: Copy secrets to clipboard with automatic clearing after 45 seconds
 - **Pattern Matching**: List and search secrets using wildcards
 - **Simple CLI**: Intuitive commands for adding, removing, and managing secrets
@@ -55,7 +58,7 @@ echo "secret-value" | kcm add TOKEN -
 cat ~/secret-file.txt | kcm add AWS_SECRET -
 ```
 
-Multiline secrets such as PEM keys work through stdin. Adding a name that already exists updates its value.
+Multiline secrets such as PEM keys work through stdin. Adding a name that already exists updates its value. If the name matches several Keychain entries ambiguously, `add` refuses to change any of them.
 
 After adding, you'll get a `.env` entry like:
 
@@ -167,7 +170,7 @@ For this to work for everyone:
 
 ### Inspecting what `use` loads
 
-Run `kcm use` without a command to list the variables it would load, with the file each one comes from. Values stay hidden:
+Run `kcm use` without a command to list variable names and their source files without reading passwords from Keychain.
 
 ```
 $ kcm use
@@ -203,6 +206,8 @@ kcm ls "*_KEY"
 kcm remove OLD_API_KEY
 ```
 
+When several Keychain entries share a service name, kcm prefers its tagged entry, then a legacy entry for your user account. An untagged entry under another account is used only when no other entry has that name. If the best match is ambiguous, give the entries distinct service names in Keychain Access before retrying.
+
 ## Environment File Format
 
 Your `.env` files can use the special `keychain://` prefix to reference Keychain secrets:
@@ -218,13 +223,15 @@ PORT=3000
 NODE_ENV=development
 ```
 
-When you run `kcm use -- <command>`, all `keychain://` references are resolved from the Keychain. If a secret is missing, kcm prints a warning and passes the `keychain://` text through unchanged.
+When you run `kcm use -- <command>`, all `keychain://` references are resolved from the Keychain. If a secret is missing or unreadable, kcm prints a warning and passes the `keychain://` text through unchanged. If a name matches several Keychain entries ambiguously, kcm stops without running the command.
 
 Parsing rules:
 
 - Values are passed to the command as plain text. kcm never runs them through a shell, so `$`, `&` or `;` in a value stay as they are.
 - Single or double quotes around a value are removed. A quoted value can span several lines. A closing quote on a line of its own keeps the line break before it, as in dotenv.
 - Text after the closing quote is ignored, so `API_KEY="keychain://API_KEY" # staging` works. In an unquoted value, a `#` is part of the value.
+- An unfinished quoted value stops parsing. The error names the file and opening line.
+- `kcm use` rejects assignments to Bash-managed variables such as `UID`, `RANDOM` and `IFS` before reading secrets. Variables already exported by the caller still take precedence.
 - An `export ` prefix is allowed: `export PORT=3000`.
 - Lines starting with `#`, blank lines and lines without a valid variable name are skipped.
 - Windows (CRLF) line endings are fine.
@@ -334,9 +341,12 @@ If a secret seems stuck or corrupted:
 # Remove using kcm
 kcm remove KEY_NAME
 
-# Or remove directly via security command
-security delete-generic-password -s "KEY_NAME"
+# Or remove directly via security command. Give the account, because
+# without -a it deletes the first entry with that name, whoever owns it.
+security delete-generic-password -s "KEY_NAME" -a "$USER"
 ```
+
+If `kcm remove` says the name is ambiguous, open Keychain Access, find the entries with that name, and delete or rename the one you no longer need.
 
 ## Development
 

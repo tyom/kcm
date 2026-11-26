@@ -8,18 +8,16 @@ set -uo pipefail
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Test counters
 PASSED=0
 FAILED=0
-SKIPPED=0
 
 # Test environment
-TEST_DIR=$(mktemp -d)
+TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/TEST_KCM_KEY_XXXXXXXXXX") || exit 1
 TEST_ENV="$TEST_DIR/.env"
-TEST_KEY="TEST_KCM_KEY_$$"
+TEST_KEY="${TEST_DIR##*/}"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/kcm"
 
 # Discovery tests expect the default mode unless they set NODE_ENV themselves
@@ -32,9 +30,12 @@ cleanup() {
     while security delete-generic-password -s "$TEST_KEY" >/dev/null 2>&1; do :; done
     security delete-generic-password -s "${TEST_KEY}_2" >/dev/null 2>&1 || true
     security delete-generic-password -s "${TEST_KEY}_QUOTE" >/dev/null 2>&1 || true
-    security delete-generic-password -s "TEST_PATTERN_ONE" >/dev/null 2>&1 || true
-    security delete-generic-password -s "TEST_PATTERN_TWO" >/dev/null 2>&1 || true
-    security delete-generic-password -s "OTHER_PATTERN" >/dev/null 2>&1 || true
+    security delete-generic-password -s "${TEST_KEY}_TEST_PATTERN_ONE" >/dev/null 2>&1 || true
+    security delete-generic-password -s "${TEST_KEY}_TEST_PATTERN_TWO" >/dev/null 2>&1 || true
+    security delete-generic-password -s "${TEST_KEY}_OTHER_PATTERN" >/dev/null 2>&1 || true
+    for suffix in SHARED COLLISION; do
+        while security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1; do :; done
+    done
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
     for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
@@ -44,7 +45,8 @@ cleanup() {
     rm -rf "$TEST_DIR"
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 # Test functions
 pass() {
@@ -55,11 +57,6 @@ pass() {
 fail() {
     echo -e "${RED}✗${NC} $1"
     ((FAILED++))
-}
-
-skip() {
-    echo -e "${YELLOW}⊘${NC} $1 (skipped)"
-    ((SKIPPED++))
 }
 
 assert_equals() {
@@ -164,6 +161,17 @@ output=$("$SCRIPT_PATH" ls 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "List command exits successfully"
 assert_contains "$output" "$TEST_KEY" "List shows test key"
 
+# A keychain that can't be dumped makes ls fail instead of printing a partial list
+mkdir -p "$TEST_DIR/faildump"
+cat > "$TEST_DIR/faildump/security" << 'EOF'
+#!/bin/bash
+[ "${1:-}" = dump-keychain ] && exit 1
+exec /usr/bin/security "$@"
+EOF
+chmod +x "$TEST_DIR/faildump/security"
+PATH="$TEST_DIR/faildump:$PATH" "$SCRIPT_PATH" ls >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "List fails when a keychain can't be read"
+
 # ls shows kcm's entries, then untagged ones from older kcm versions, and hides other apps' entries
 security add-generic-password -s "${TEST_KEY}_LEGACY" -a "$USER" -w old >/dev/null 2>&1
 security add-generic-password -s "${TEST_KEY}_OTHER_APP" -a "some-app" -w x >/dev/null 2>&1
@@ -174,6 +182,28 @@ assert_contains "$kcm_part" "• $TEST_KEY"$'\n' "List shows kcm entries first"
 assert_not_contains "$kcm_part" "${TEST_KEY}_LEGACY" "List keeps untagged entries out of the kcm group"
 assert_contains "$legacy_part" "• ${TEST_KEY}_LEGACY" "List shows untagged entries from older kcm separately"
 assert_not_contains "$output" "${TEST_KEY}_OTHER_APP" "List hides other apps' entries"
+
+# A tagged credential wins even when a different account registered the name first.
+shared="${TEST_KEY}_SHARED"
+security add-generic-password -s "$shared" -a other -w original
+security add-generic-password -s "$shared" -a "$USER" -c 'kcm ' -w tagged
+assert_equals "tagged" "$("$SCRIPT_PATH" show "$shared")" "Show selects the tagged credential"
+printf updated | "$SCRIPT_PATH" add "$shared" - >/dev/null 2>&1
+assert_equals "updated" "$("$SCRIPT_PATH" show "$shared")" "Add updates the tagged credential"
+"$SCRIPT_PATH" remove "$shared" >/dev/null 2>&1
+assert_equals "original" "$("$SCRIPT_PATH" show "$shared")" "Remove leaves the other account intact"
+
+# Two tagged items are equally good matches. Neither may be removed by name.
+collision="${TEST_KEY}_COLLISION"
+for acct in one two; do
+    security add-generic-password -s "$collision" -a "$acct" -c 'kcm ' -w "$acct"
+done
+output=$("$SCRIPT_PATH" remove "$collision" 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Refuses to remove an ambiguous credential"
+assert_contains "$output" "ambiguous" "Explains why the credential cannot be selected"
+for acct in one two; do
+    security delete-generic-password -s "$collision" -a "$acct" >/dev/null 2>&1 || true
+done
 
 # Test 6: Remove secret
 "$SCRIPT_PATH" remove "$TEST_KEY" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
@@ -192,6 +222,15 @@ assert_equals "$secret" "$output" "Multiline secret resolved by use"
 printf 'abc\n\n' | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
 "$SCRIPT_PATH" show "$TEST_KEY" | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
 assert_equals "$(printf 'abc\n\nx')" "$("$SCRIPT_PATH" show "$TEST_KEY"; printf x)" "show piped to add keeps a trailing newline"
+
+# Capture pbcopy's input without changing the user's clipboard.
+mkdir -p "$TEST_DIR/pasteboard"
+printf '#!/bin/sh\ncat > "$TEST_CLIPBOARD"\n' > "$TEST_DIR/pasteboard/pbcopy"
+printf '#!/bin/sh\nexit 1\n' > "$TEST_DIR/pasteboard/pbpaste"
+cp "$TEST_DIR/pasteboard/pbpaste" "$TEST_DIR/pasteboard/sleep"
+chmod +x "$TEST_DIR/pasteboard/"*
+TEST_CLIPBOARD="$TEST_DIR/copied" PATH="$TEST_DIR/pasteboard:$PATH" "$SCRIPT_PATH" copy "$TEST_KEY" >/dev/null 2>&1
+assert_equals "$(printf 'abc\nx')" "$(cat "$TEST_DIR/copied"; printf x)" "Copy preserves the stored trailing newline"
 
 # A value near the security -i line limit still stores whole
 long=$(head -c 2020 /dev/zero | tr '\0' 'v')
@@ -371,6 +410,11 @@ EOF
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$VALID_VAR"' 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "valid_value" "$output" "Valid var processed despite malformed entries"
 
+printf 'BEFORE=yes\nTOKEN="unfinished\nAFTER=no\n' > "$TEST_DIR/broken.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/broken.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Unclosed quote stops the command"
+assert_contains "$output" "$TEST_DIR/broken.env:2" "Unclosed quote reports its opening line"
+
 # Test 22: Command with arguments
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo $1 $2' -- "arg1" "arg2" 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "arg1 arg2" "$output" "Arguments passed correctly"
@@ -427,6 +471,22 @@ printf 'GONE=keychain://KCM_TEST_MISSING_%s\n' "$$" > "$TEST_ENV"
 output=$(GONE=shell "$SCRIPT_PATH" use --env-file "$TEST_ENV" -- true 2>&1)
 assert_not_contains "$output" "not found" "Skips Keychain lookup for variable set in environment"
 
+printf 'FIRST=keychain://%s_MISSING\nUID=1000\n' "$TEST_KEY" > "$TEST_DIR/managed.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/managed.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Rejects a Bash-managed name"
+assert_contains "$output" "$TEST_DIR/managed.env: UID is managed by Bash" "Names the file and reserved variable"
+assert_not_contains "$output" "keychain://${TEST_KEY}_MISSING" "Checks names before resolving any secrets"
+
+# Bash defines HOSTNAME without exporting it, but setting it is harmless and common.
+printf 'HOSTNAME=0.0.0.0\n' > "$TEST_DIR/hostname.env"
+output=$(env -u HOSTNAME "$SCRIPT_PATH" use -e "$TEST_DIR/hostname.env" -- sh -c 'echo "$HOSTNAME"' 2>&1)
+assert_equals "0.0.0.0" "$output" "Passes HOSTNAME from a .env file"
+
+printf 'CATALOGUE=keychain://%s_MISSING\n' "$TEST_KEY" > "$TEST_DIR/catalogue.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/catalogue.env" 2>&1)
+assert_contains "$output" "CATALOGUE" "Lists names from files with Keychain references"
+assert_not_contains "$output" "not found in Keychain" "Listing names skips password lookups"
+
 # -e without a file name
 output=$("$SCRIPT_PATH" use -e 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 1 "$exit_code" "-e without argument fails"
@@ -470,6 +530,13 @@ output=$("$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>/dev/null)
 assert_equals "$(printf 'LONG_SECRET=sk-a…9f2c\nSHORT=****')" "$output" "Show values masks values"
 output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use --full 2>/dev/null | cat)
 assert_equals "$(printf 'ROOT_ONLY=root\nSHARED=web\nWEB_ONLY=web')" "$output" "--full prints merged values"
+
+# In a terminal the = is dimmed; NO_COLOR and pipes (above) stay plain
+output=$(NO_COLOR='' script -q /dev/null "$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>&1)
+assert_contains "$output" $'LONG_SECRET\033[90m=' "Show values dims the = in a terminal"
+assert_equals "LONG_SECRET=sk-a…9f2c" "$(strip_ansi <<< "$output" | grep -o 'LONG_SECRET=.*')" "Colour leaves the text unchanged"
+output=$(NO_COLOR=1 script -q /dev/null "$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>&1)
+assert_not_contains "$output" $'\033[90m=' "NO_COLOR keeps show values plain"
 
 # Test: --env-file with no command lists that file only
 output=$("$SCRIPT_PATH" use -e "$MONO/.env" 2>/dev/null | tr -s ' ')
@@ -655,11 +722,11 @@ cat > "$MID/bin/security" << 'EOF'
 if [ "${1:-}" = -i ]; then
   { printf 'PORT=3000\n'; cat "$MID_FILE"; } > "$MID_FILE.new" && mv "$MID_FILE.new" "$MID_FILE"
 fi
-exec /usr/bin/security "$@"
+exec "$TEST_SECURITY" "$@"
 EOF
 chmod +x "$MID/bin/security"
 printf '%s_MID_KEY=sk-mid-1\n' "$TEST_KEY" > "$MID/.env"
-(cd "$MID" && printf '\ny\n' | MID_FILE="$MID/.env" PATH="$MID/bin:$PATH" "$SCRIPT_PATH" import >/dev/null 2>&1) && exit_code=$? || exit_code=$?
+(cd "$MID" && printf '\ny\n' | MID_FILE="$MID/.env" TEST_SECURITY="$(command -v security)" PATH="$MID/bin:$PATH" "$SCRIPT_PATH" import >/dev/null 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "$(printf 'PORT=3000\n%s_MID_KEY=sk-mid-1' "$TEST_KEY")" "$(cat "$MID/.env")" "Import leaves a file changed during the store alone"
 assert_exit_code 1 "$exit_code" "Import exits 1 when a file changed during the store"
 
@@ -715,6 +782,10 @@ assert_contains "$output" "${TEST_KEY}_CLASH    ./.env  ****       name has KEY 
 assert_contains "$(grep DONE_REF <<< "$output")" "✓" "Import shows an existing reference as done"
 assert_contains "$(grep BROKEN_REF <<< "$output")" "missing from Keychain" "Import flags a reference missing from Keychain"
 
+printf 'BROKEN=keychain://%s_MISSING\n' "$TEST_KEY" > "$TEST_DIR/refs.env"
+output=$("$SCRIPT_PATH" import -e "$TEST_DIR/refs.env" </dev/null 2>&1)
+assert_contains "$output" "keychain://${TEST_KEY}_MISSING missing from Keychain" "Reports a broken reference in a fully imported file"
+
 # In the key-driven list, the NAME heading starts in the same column as the names
 printf 'LONG_NAME_FOR_ALIGN=plain\n' > "$IMP/.env"
 output=$(cd "$IMP" && printf 'q' | script -q /dev/null "$SCRIPT_PATH" import 2>&1 | strip_ansi)
@@ -728,20 +799,20 @@ echo "Test Group: Pattern Matching"
 echo "----------------------------"
 
 # Add test secrets for pattern matching
-echo "value1" | "$SCRIPT_PATH" add "TEST_PATTERN_ONE" - >/dev/null 2>&1
-echo "value2" | "$SCRIPT_PATH" add "TEST_PATTERN_TWO" - >/dev/null 2>&1
-echo "value3" | "$SCRIPT_PATH" add "OTHER_PATTERN" - >/dev/null 2>&1
+echo "value1" | "$SCRIPT_PATH" add "${TEST_KEY}_TEST_PATTERN_ONE" - >/dev/null 2>&1
+echo "value2" | "$SCRIPT_PATH" add "${TEST_KEY}_TEST_PATTERN_TWO" - >/dev/null 2>&1
+echo "value3" | "$SCRIPT_PATH" add "${TEST_KEY}_OTHER_PATTERN" - >/dev/null 2>&1
 
 # Test 23: List with pattern
-output=$("$SCRIPT_PATH" ls "TEST_PATTERN*" 2>&1) && exit_code=$? || exit_code=$?
-assert_contains "$output" "TEST_PATTERN_ONE" "Pattern matches first key"
-assert_contains "$output" "TEST_PATTERN_TWO" "Pattern matches second key"
-assert_not_contains "$output" "OTHER_PATTERN" "Pattern excludes non-matching"
+output=$("$SCRIPT_PATH" ls "${TEST_KEY}_TEST_PATTERN*" 2>&1) && exit_code=$? || exit_code=$?
+assert_contains "$output" "${TEST_KEY}_TEST_PATTERN_ONE" "Pattern matches first key"
+assert_contains "$output" "${TEST_KEY}_TEST_PATTERN_TWO" "Pattern matches second key"
+assert_not_contains "$output" "${TEST_KEY}_OTHER_PATTERN" "Pattern excludes non-matching"
 
 # Cleanup pattern test keys
-"$SCRIPT_PATH" remove "TEST_PATTERN_ONE" >/dev/null 2>&1
-"$SCRIPT_PATH" remove "TEST_PATTERN_TWO" >/dev/null 2>&1
-"$SCRIPT_PATH" remove "OTHER_PATTERN" >/dev/null 2>&1
+"$SCRIPT_PATH" remove "${TEST_KEY}_TEST_PATTERN_ONE" >/dev/null 2>&1
+"$SCRIPT_PATH" remove "${TEST_KEY}_TEST_PATTERN_TWO" >/dev/null 2>&1
+"$SCRIPT_PATH" remove "${TEST_KEY}_OTHER_PATTERN" >/dev/null 2>&1
 
 echo
 echo "======================================"
@@ -749,7 +820,6 @@ echo "Test Summary"
 echo "======================================"
 echo -e "${GREEN}Passed:${NC} $PASSED"
 echo -e "${RED}Failed:${NC} $FAILED"
-echo -e "${YELLOW}Skipped:${NC} $SKIPPED"
 echo
 
 if [ $FAILED -eq 0 ]; then

@@ -142,7 +142,8 @@ COMMANDS:
 ENVIRONMENT VARIABLE FORMAT:
   keychain://LABEL - Retrieved from macOS Keychain
 
-  If a secret cannot be resolved, kcm warns and keeps the original value.
+  If a secret is missing or unreadable, kcm warns and keeps the original value.
+  If the name matches several Keychain entries ambiguously, kcm stops.
 
 EOF
 }
@@ -198,10 +199,6 @@ add_secret() {
     error_exit "Inline values are not supported. Use interactive input or pipe via '-'"
   fi
 
-  if keychain_entry_exists "$KEY_NAME"; then
-    info "Keychain entry '$KEY_NAME' already exists. Updating..."
-  fi
-
   if store_secret "$KEY_NAME" "$SECRET_VALUE"; then
     success "Secret added to Keychain"
 
@@ -232,37 +229,45 @@ security_quote() {
 # Kind "kcm secret" and creator "kcm " mark kcm's entries; these attributes are not encrypted.
 store_secret() {
   local name="$1" value="$2" comment="${3:-Added by kcm}" account hex cmd got
-  # -U only updates an entry whose account matches, so reuse the existing entry's account
-  account=$(security find-generic-password -s "$name" 2>/dev/null | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p' | head -n 1)
-  account="${account:-$USER}"
+  local update=() target=() status keychain_arg=""
+  if select_keychain_item "$name"; then
+    account="$_KCM_ITEM_ACCOUNT"
+    target=("$_KCM_ITEM_KEYCHAIN")
+    update=(-U)
+    keychain_arg=" $(security_quote "$_KCM_ITEM_KEYCHAIN")"
+  else
+    status=$?
+    [ "$status" -eq 44 ] || return 1
+    account="$USER"
+  fi
   hex=$(printf '%s' "$value" | xxd -p | tr -d '\n')
-  cmd="add-generic-password -U -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex"
+  cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
   # security -i silently truncates lines over 4095 bytes. Drop the source path before
   # giving up on stdin, so the metadata never pushes a value onto argv.
   if [ ${#cmd} -ge 4096 ] && [[ "$comment" == *" from "* ]]; then
     comment="${comment%% from *}"
-    cmd="add-generic-password -U -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex"
+    cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
   fi
   if [ ${#cmd} -lt 4096 ]; then
     printf '%s\n' "$cmd" | security -i >/dev/null 2>&1
   else
     # shortcut: security -i reads at most 4095 bytes per line, so values over ~2 KB still go through argv
-    security add-generic-password -U -s "$name" -a "$account" -D "kcm secret" -c "kcm " -j "$comment" \
-      -X "$hex" >/dev/null 2>&1 || return 1
+    security add-generic-password ${update[@]+"${update[@]}"} -s "$name" -a "$account" -D "kcm secret" -c "kcm " -j "$comment" \
+      -X "$hex" ${target[@]+"${target[@]}"} >/dev/null 2>&1 || return 1
   fi
   # security -i exits 0 even when the command fails, so read the value back.
   # The x keeps trailing newlines that $(...) would strip.
-  got=$(read_secret "$name" "$account" && printf x) || return 1
+  got=$(read_secret "$name" && printf x) || return 1
   [ "$got" = "${value}x" ]
 }
 
 # Print a secret's value.
 # -w prints hex once a value has a newline or other non-printable byte, so parse -g instead:
 # it prints `password: "value"` or `password: 0x<hex>  "<escaped>"`.
-# An optional second argument limits the lookup to that account.
 read_secret() {
   local out
-  out=$(security find-generic-password -s "$1" ${2:+-a "$2"} -g 2>&1 >/dev/null) || return 1
+  select_keychain_item "$1" || return $?
+  out=$(security find-generic-password -s "$1" -a "$_KCM_ITEM_ACCOUNT" -g "$_KCM_ITEM_KEYCHAIN" 2>&1 >/dev/null) || return 1
   out=$(sed -n 's/^password: //p' <<< "$out")
   case "$out" in
     0x*) out="${out%% *}"; xxd -r -p <<< "${out#0x}" ;;
@@ -271,10 +276,33 @@ read_secret() {
   esac
 }
 
-# Check if a keychain entry exists
-keychain_entry_exists() {
-  local key_name="$1"
-  security find-generic-password -s "$key_name" >/dev/null 2>&1
+# Choose the same tagged or legacy entry as ls. An untagged entry under another account
+# is used only when it is the sole entry with that name: another app's entry beside it
+# could belong to the same app, so kcm refuses rather than guess. Status 44 means absent.
+select_keychain_item() {
+  local name="$1" matches rank account keychain best=0 count=0 total=0
+  [ -n "$name" ] || return 44
+  security find-generic-password -s "$name" >/dev/null 2>&1 || return $?
+  matches=$(keychain_services '.*' "$name") || return 1
+  while IFS=$'\t' read -r rank account keychain; do
+    [ -n "$rank" ] || continue
+    total=$((total + 1))
+    if (( rank > best )); then
+      best=$rank
+      count=0
+      _KCM_ITEM_ACCOUNT="${account#=}"
+      _KCM_ITEM_KEYCHAIN="$keychain"
+    fi
+    if (( rank == best )); then count=$((count + 1)); fi
+  done <<< "$matches"
+  if (( count > 1 || (best == 1 && total > 1) )); then
+    info "Keychain name '$name' is ambiguous. Give each matching entry a distinct service name."
+    return 2
+  fi
+  if (( best == 0 )) || [ -z "$_KCM_ITEM_ACCOUNT" ] || [ -z "$_KCM_ITEM_KEYCHAIN" ]; then
+    info "Cannot select a unique kcm or untagged Keychain item for '$name'"
+    return 2
+  fi
 }
 
 # Split TEXT at its closing quote Q: the first Q followed only by spaces or a # comment.
@@ -350,6 +378,9 @@ process_env_file() {
     esac
     add_env_value "$var_name" "$var_value" "$start:$lineno"
   done < "$env_file"
+  if [ -n "$quote_char" ]; then
+    error_exit "$env_file:$start: unclosed quote for $var_name"
+  fi
 }
 
 # Print the git root: the nearest folder with .git (a file in worktrees), from the physical cwd
@@ -405,13 +436,13 @@ discover_env_files() {
 }
 
 # Parse _KCM_ENV_FILES in order; a later file overrides an earlier one, the environment wins.
-# Resolves keychain:// only for the winning values. Sets _KCM_MERGED_NAMES, _KCM_MERGED_VALUES and _KCM_MERGED_SOURCES.
+# Keep references as text until the caller needs values.
 merge_env_files() {
   _KCM_MERGED_NAMES=()
   _KCM_MERGED_VALUES=()
   _KCM_MERGED_SOURCES=()
 
-  local file idx j k name value
+  local file idx j k name
   for file in ${_KCM_ENV_FILES[@]+"${_KCM_ENV_FILES[@]}"}; do
     process_env_file "$file"
     for idx in "${!_KCM_PROCESSED_ENV_NAMES[@]}"; do
@@ -426,14 +457,18 @@ merge_env_files() {
       if is_exported "$name"; then _KCM_MERGED_SOURCES[j]="environment"; fi
     done
   done
+}
 
-  # Only now, so overridden references cost no lookup or Keychain prompt
+resolve_env_values() {
+  local k value
   for k in "${!_KCM_MERGED_NAMES[@]}"; do
     value="${_KCM_MERGED_VALUES[$k]}"
     [[ "$value" == keychain://* ]] && ! is_exported "${_KCM_MERGED_NAMES[$k]}" || continue
     # The x keeps trailing newlines
     if value=$(read_secret "${value#keychain://}" && printf x) && [ "$value" != x ]; then
       _KCM_MERGED_VALUES[k]="${value%x}"
+    elif [ "$?" -eq 2 ]; then
+      error_exit "Cannot resolve ${_KCM_MERGED_VALUES[$k]} for ${_KCM_MERGED_NAMES[$k]}"
     else
       info "Warning: ${_KCM_MERGED_VALUES[$k]} not found in Keychain, keeping it as is"
     fi
@@ -453,9 +488,11 @@ mask_value() {
 
 # Print merged variables sorted by name.
 # show_values: false (name and source file), masked or full (NAME=value)
+# colour: true dims the = and source files and tints values
 print_merged_env() {
-  local _kcm_show_values="$1"
+  local _kcm_show_values="$1" _kcm_dim="" _kcm_tint="" _kcm_off=""
   local _kcm_width=0 _kcm_name _kcm_k _kcm_value
+  if [ "${2:-false}" = true ]; then _kcm_dim=$'\033[90m'; _kcm_tint=$'\033[36m'; _kcm_off=$'\033[0m'; fi
   for _kcm_name in ${_KCM_MERGED_NAMES[@]+"${_KCM_MERGED_NAMES[@]}"}; do
     [ "${#_kcm_name}" -gt "$_kcm_width" ] && _kcm_width=${#_kcm_name}
   done
@@ -465,14 +502,19 @@ print_merged_env() {
     printf '%s %s\n' "${_KCM_MERGED_NAMES[$_kcm_k]}" "$_kcm_k"
   done | LC_ALL=C sort | while read -r _kcm_name _kcm_k; do
     if [ "$_kcm_show_values" = false ]; then
-      printf '%-*s  %s\n' "$_kcm_width" "$_kcm_name" "${_KCM_MERGED_SOURCES[$_kcm_k]}"
+      printf '%-*s  %s%s%s\n' "$_kcm_width" "$_kcm_name" "$_kcm_dim" "${_KCM_MERGED_SOURCES[$_kcm_k]}" "$_kcm_off"
       continue
     fi
     _kcm_value="${_KCM_MERGED_VALUES[$_kcm_k]}"
     # printenv adds one newline; the x keeps any newlines of the value itself
     if is_exported "$_kcm_name"; then _kcm_value=$(printenv "$_kcm_name"; echo x); _kcm_value="${_kcm_value%$'\nx'}"; fi
-    [ "$_kcm_show_values" = masked ] && _kcm_value=$(mask_value "$_kcm_value")
-    printf '%s=%s\n' "$_kcm_name" "$_kcm_value"
+    if [ "$_kcm_show_values" = masked ]; then
+      _kcm_value=$(mask_value "$_kcm_value")
+      _kcm_value="${_kcm_value//…/${_kcm_dim}…${_kcm_tint}}"
+    fi
+    # Close and reopen the tint at each line break so less -R keeps it per line
+    _kcm_value="${_kcm_value//$'\n'/$_kcm_off$'\n'$_kcm_tint}"
+    printf '%s%s=%s%s%s%s\n' "$_kcm_name" "$_kcm_dim" "$_kcm_off" "$_kcm_tint" "$_kcm_value" "$_kcm_off"
   done
 }
 
@@ -540,18 +582,38 @@ use_secrets() {
   _KCM_EXPORTED_NAMES=$'\n'"$(compgen -e)"$'\n'
   merge_env_files
 
+  # The only locals in scope here use the _kcm_ prefix. Other unexported
+  # variables already declared by the shell belong to Bash.
+  local _kcm_k _kcm_name
+  for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
+    _kcm_name="${_KCM_MERGED_NAMES[$_kcm_k]}"
+    is_exported "$_kcm_name" && continue
+    case "$_kcm_name" in
+      _KCM_*|_kcm_*) error_exit "${_KCM_MERGED_SOURCES[$_kcm_k]}: $_kcm_name is reserved by kcm" ;;
+      # Bash sets these but they are plain, writable variables
+      HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|OPTIND|OPTERR) continue ;;
+      BASH_ENV|BASH_XTRACEFD|BASH_REMATCH|OPTARG|POSIXLY_CORRECT) ;;
+      *) declare -p "$_kcm_name" >/dev/null 2>&1 || continue ;;
+    esac
+    error_exit "${_KCM_MERGED_SOURCES[$_kcm_k]}: $_kcm_name is managed by Bash"
+  done
+  if [ ${#_kcm_args[@]} -gt 0 ] || [ "$_kcm_show_values" != false ]; then
+    resolve_env_values
+  fi
+
   # No command: list what would be loaded
   if [ ${#_kcm_args[@]} -eq 0 ]; then
+    local _kcm_colour=false
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then _kcm_colour=true; fi
     if [ "$_kcm_show_values" = full ] && [ -t 1 ]; then
       # less keeps secrets off the scrollback: -+F -+X force its separate screen even if $LESS disables it
-      print_merged_env full | less -+F -+X || true
+      print_merged_env full "$_kcm_colour" | less -R -+F -+X || true
     else
-      print_merged_env "$_kcm_show_values"
+      print_merged_env "$_kcm_show_values" "$_kcm_colour"
     fi
     return 0
   fi
 
-  local _kcm_k
   for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
     if is_exported "${_KCM_MERGED_NAMES[$_kcm_k]}"; then continue; fi
     export "${_KCM_MERGED_NAMES[$_kcm_k]}=${_KCM_MERGED_VALUES[$_kcm_k]}"
@@ -865,10 +927,12 @@ import_secrets() {
       if [[ "$value" == keychain://* ]]; then
         ref_names[m]="${_KCM_PROCESSED_ENV_NAMES[$idx]}"
         ref_files[m]="$file"
-        if [[ "$in_keychain" == *$'\n'"${value#keychain://}"$'\n'* ]]; then
+        if ! [[ "$in_keychain" == *$'\n'"${value#keychain://}"$'\n'* ]]; then
+          ref_marks[m]='!'; ref_tints[m]="$_KCM_YELLOW"; ref_whys[m]="$value missing from Keychain"
+        elif select_keychain_item "${value#keychain://}"; then
           ref_marks[m]='✓'; ref_tints[m]="$_KCM_GREY"; ref_whys[m]="$value"
         else
-          ref_marks[m]='!'; ref_tints[m]="$_KCM_YELLOW"; ref_whys[m]="$value missing from Keychain"
+          ref_marks[m]='!'; ref_tints[m]="$_KCM_YELLOW"; ref_whys[m]="$value cannot be selected"
         fi
         m=$((m + 1))
         continue
@@ -883,8 +947,11 @@ import_secrets() {
       labels[n]="$label"; kc_states[n]=""; kc_values[n]=""
       if [[ "$in_keychain" == *$'\n'"$label"$'\n'* ]]; then
         if existing=$(read_secret "$label" && printf x); then existing="${existing%x}"; kc_states[n]=readable; kc_values[n]="$existing"
+        elif [ "$?" -eq 2 ]; then kc_states[n]=conflict
         else kc_states[n]=unreadable; fi
-        if [ "${kc_states[n]}" = unreadable ]; then
+        if [ "${kc_states[n]}" = conflict ]; then
+          state="Keychain name cannot be selected"; tint="$_KCM_YELLOW"; tick=false
+        elif [ "${kc_states[n]}" = unreadable ]; then
           state="${state:+$state, }in Keychain, unreadable"; tint="$_KCM_YELLOW"
         elif [ "$existing" = "$value" ]; then
           # Only the reference is written, nothing new is stored
@@ -917,7 +984,10 @@ import_secrets() {
     done
   done
   if [ "$n" -eq 0 ]; then
-    if [ "$m" -gt 0 ]; then info "No plain values to import; $m already use keychain://"; else info "No plain values to import"; fi
+    for (( idx=0; idx<m; idx++ )); do
+      printf '%s %s  %s  %s\n' "${ref_marks[idx]}" "${ref_names[idx]}" "${ref_files[idx]}" "${ref_whys[idx]}" >&2
+    done
+    info "No plain values to import"
     return 0
   fi
 
@@ -980,12 +1050,15 @@ import_secrets() {
       done
       # The scan already read the default label: don't read it (or prompt) again
       if [ "$found" = false ] && [ "$label" = "${labels[i]}" ] && [ -n "${kc_states[i]}" ]; then
+        [ "${kc_states[i]}" != conflict ] || error_exit "Cannot import ${names[i]} under Keychain name '$label'"
         found=true; existing="${kc_values[i]}"
         [ "${kc_states[i]}" = unreadable ] && shown="unreadable"
       elif [ "$found" = false ]; then
         if existing=$(read_secret "$label" && printf x); then
           existing="${existing%x}"; found=true
-        elif keychain_entry_exists "$label"; then
+        elif [ "$?" -eq 2 ]; then
+          error_exit "Cannot import ${names[i]} under Keychain name '$label'"
+        elif select_keychain_item "$label"; then
           # Exists but kcm can't read it: never overwrite it unasked
           found=true; existing=""; shown="unreadable"
         fi
@@ -1072,7 +1145,7 @@ import_secrets() {
       *) continue ;;
     esac
     if [ "${ref_values[i]}" = "?" ]; then
-      keychain_entry_exists "${labels[i]}" && continue
+      select_keychain_item "${labels[i]}" && continue
     elif got=$(read_secret "${labels[i]}" && printf x) && [ "=$got" = "${ref_values[i]}x" ]; then
       continue
     fi
@@ -1129,16 +1202,16 @@ remove_secret() {
 
   local KEY_NAME="$1"
 
-  # Check if entry exists
-  if keychain_entry_exists "$KEY_NAME"; then
+  if select_keychain_item "$KEY_NAME"; then
     # Delete the entry
-    if security delete-generic-password -s "$KEY_NAME" >/dev/null 2>&1; then
+    if security delete-generic-password -s "$KEY_NAME" -a "$_KCM_ITEM_ACCOUNT" "$_KCM_ITEM_KEYCHAIN" >/dev/null 2>&1; then
       success "Secret '$KEY_NAME' removed from Keychain"
     else
       error_exit "Failed to remove secret '$KEY_NAME' from Keychain"
     fi
   else
-    error_exit "Secret '$KEY_NAME' not found in Keychain"
+    [ "$?" -eq 2 ] && exit 1
+    error_exit "Secret '$KEY_NAME' not found or unreadable in Keychain"
   fi
 }
 
@@ -1160,7 +1233,8 @@ show_secret() {
   if value=$(read_secret "$KEY_NAME" && printf x) && [ "$value" != x ]; then
     printf '%s\n' "${value%x}"
   else
-    error_exit "Secret '$KEY_NAME' not found in Keychain"
+    [ "$?" -eq 2 ] && exit 1
+    error_exit "Secret '$KEY_NAME' not found or unreadable in Keychain"
   fi
 }
 
@@ -1182,7 +1256,8 @@ copy_secret() {
   local value
 
   # Get the secret value
-  if value=$(read_secret "$KEY_NAME") && [ -n "$value" ]; then
+  if value=$(read_secret "$KEY_NAME" && printf x) && [ "$value" != x ]; then
+    value="${value%x}"
     printf '%s' "$value" | pbcopy
     success "Secret '$KEY_NAME' copied to clipboard"
     info "Clipboard will be cleared in 45 seconds for security"
@@ -1191,10 +1266,11 @@ copy_secret() {
     # Closed file descriptors keep the terminal from waiting on it.
     (
       sleep 45
-      if [ "$(pbpaste)" = "$value" ]; then pbcopy </dev/null; fi
+      if pasted=$(pbpaste && printf x) && [ "$pasted" = "${value}x" ]; then pbcopy </dev/null; fi
     ) </dev/null >/dev/null 2>&1 &
   else
-    error_exit "Secret '$KEY_NAME' not found in Keychain"
+    [ "$?" -eq 2 ] && exit 1
+    error_exit "Secret '$KEY_NAME' not found or unreadable in Keychain"
   fi
 }
 
@@ -1203,35 +1279,50 @@ copy_secret() {
 # versions wrote them: no creator or kind, account $USER, a valid key name) or other.
 # Reads attributes only, so it never asks for Keychain access.
 keychain_services() {
-  local regex="$1" keychains keychain
-  keychains=$(security list-keychains 2>/dev/null | tr -d '"' | sed '/^$/d') || keychains=""
+  local regex="$1" exact="${2:-}" keychains keychain status
+  keychains=$(security list-keychains) || return 1
   while IFS= read -r keychain; do
-    [ -n "$keychain" ] || continue
-    keychain=$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' <<< "$keychain")
-    security dump-keychain "$keychain" 2>/dev/null | awk -v regex="$regex" -v user="$USER" '
+    [[ "$keychain" =~ ^[[:space:]]*\"(.*)\"[[:space:]]*$ ]] || continue
+    keychain="${BASH_REMATCH[1]}"
+    if [ -n "$exact" ]; then
+      status=0
+      security find-generic-password -s "$exact" "$keychain" >/dev/null 2>&1 || status=$?
+      [ "$status" -eq 44 ] && continue
+      [ "$status" -eq 0 ] || return 1
+    fi
+    security dump-keychain "$keychain" 2>/dev/null | KCM_CHAIN="$keychain" KCM_LABEL="$exact" awk -v regex="$regex" -v user="$USER" '
       # Attribute value: "text" without the quotes, or <NULL> as is
       function val(line) {
         sub(/^[^=]*=/, "", line)
         if (line ~ /^".*"$/) line = substr(line, 2, length(line) - 2)
         return line
       }
-      function flush(  origin) {
+      function flush(  origin, rank) {
         if (genp && svc != "" && svc ~ regex) {
           if (crtr == "kcm ") origin = "kcm"
           else if (crtr == "<NULL>" && desc == "<NULL>" && acct == user && svc ~ /^[A-Za-z][A-Za-z0-9_]*$/) origin = "legacy"
           else origin = "other"
-          print origin " " svc
+          if (ENVIRON["KCM_LABEL"] == "") print origin " " svc
+          else if (svc == ENVIRON["KCM_LABEL"]) {
+            if (origin == "kcm") rank = 3
+            else if (origin == "legacy") rank = 2
+            else if (crtr == "<NULL>" && desc == "<NULL>") rank = 1
+            else rank = 0
+            # Refuse attributes that cannot be passed back to security verbatim.
+            if (!plain_acct || acct == "" || acct ~ /[[:cntrl:]]/ || ENVIRON["KCM_CHAIN"] ~ /[[:cntrl:]]/) acct = ""
+            print rank "\t=" acct "\t" ENVIRON["KCM_CHAIN"]
+          }
         }
-        genp = 0; svc = ""; crtr = ""; desc = ""; acct = ""
+        genp = 0; svc = ""; crtr = ""; desc = ""; acct = ""; plain_acct = 0
       }
       /^keychain:/ { flush(); next }
       /^class:/ { genp = ($0 ~ /"genp"/); next }
       /^ *"svce"<blob>=/ { svc = val($0); next }
       /^ *"crtr"<uint32>=/ { crtr = val($0); next }
       /^ *"desc"<blob>=/ { desc = val($0); next }
-      /^ *"acct"<blob>=/ { acct = val($0); next }
+      /^ *"acct"<blob>=/ { plain_acct = ($0 ~ /=".*"$/); acct = val($0); next }
       END { flush() }
-    ' || true
+    ' || return 1
   done <<< "$keychains"
 }
 
@@ -1257,14 +1348,17 @@ list_secrets() {
 
   # Other apps' entries are left out
   local -a ours=() legacy=()
-  local origin service
+  local origin service services
+  # One line per service; on a name clash kcm sorts before legacy and other, so it wins.
+  # Captured first: < <(...) would hide a keychain that failed to dump.
+  services=$(keychain_services "$grep_pattern" | LC_ALL=C sort -k2,2 -k1,1 | awk '!seen[$2]++') \
+    || error_exit "Could not read every keychain in the search list"
   while read -r origin service; do
     case "$origin" in
       kcm) ours+=("$service") ;;
       legacy) legacy+=("$service") ;;
     esac
-  # One line per service; on a name clash kcm sorts before legacy and other, so it wins
-  done < <(keychain_services "$grep_pattern" | LC_ALL=C sort -k2,2 -k1,1 | awk '!seen[$2]++')
+  done <<< "$services"
 
   if [ ${#ours[@]} -eq 0 ] && [ ${#legacy[@]} -eq 0 ]; then
     echo "  No secrets found matching pattern '$pattern'"
