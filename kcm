@@ -308,7 +308,7 @@ store_secret() {
   cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \"$comment_cmd -X $hex$keychain_arg"
   # security -i silently truncates lines over 4095 bytes. Drop the source path before
   # giving up on stdin, so the metadata never pushes a value onto argv.
-  if [ "$(byte_length "$cmd")" -ge 4096 ] && [ "$keep" = false ] && [[ "$comment" == "Imported by kcm from "* ]]; then
+  if [ "$(byte_length "$cmd")" -ge 4096 ] && [ "$keep" = false ] && [ -z "$hint" ] && [[ "$comment" == "Imported by kcm from "* ]]; then
     comment="Imported by kcm"
     comment_args=(-j "$comment")
     cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
