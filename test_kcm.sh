@@ -846,6 +846,21 @@ output=$(name=caller value=caller k=caller env_file=caller text=caller count=cal
     "$SCRIPT_PATH" export -e "$TEST_DIR/export-names.env" 2>/dev/null | tr '\n' ' ')
 assert_equals "name='caller' value='caller' k='caller' env_file='caller' text='caller' count='caller' " "$output" "Export keeps exported values for names kcm uses internally"
 
+# kcm's own prefix is reserved, even when the caller exports it
+printf '_kcm_name=file\n' > "$TEST_DIR/export-reserved.env"
+output=$(_kcm_name=caller "$SCRIPT_PATH" export -e "$TEST_DIR/export-reserved.env" 2>&1 | cat)
+assert_contains "$output" "_kcm_name is reserved by kcm" "Export refuses a name with kcm's prefix"
+assert_not_contains "$output" "_kcm_name=" "Reserved name prints no value"
+
+# Another user could swap the temp file in a folder they can write to, unless it is sticky
+mkdir -p "$TEST_DIR/shared" "$TEST_DIR/sticky"
+chmod 777 "$TEST_DIR/shared"; chmod 1777 "$TEST_DIR/sticky"
+output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export.env" -o "$TEST_DIR/shared/out.env" 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Export refuses a folder others can write to"
+[ -e "$TEST_DIR/shared/out.env" ] && fail "Writes nothing to a folder others can write to" || pass "Writes nothing to a folder others can write to"
+"$SCRIPT_PATH" export -e "$TEST_DIR/export.env" -o "$TEST_DIR/sticky/out.env" >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+assert_exit_code 0 "$exit_code" "Export writes to a sticky folder"
+
 # In a terminal the text goes to less; this stand-in records what it was given
 mkdir -p "$TEST_DIR/bin"
 printf '#!/bin/sh\ncat > "%s/paged.txt"\n' "$TEST_DIR" > "$TEST_DIR/bin/less"

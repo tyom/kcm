@@ -114,7 +114,7 @@ kcm export -e .env.local | …  # or pipe it
 `export` loads the same files as `kcm use`, and variables already in your environment win in the same way. It writes one `NAME='value'` line per variable, in quotes that kcm and dotenv both read as is, so `kcm use -e shared.env` gives the same values back. Values that contain `'` use double quotes instead.
 
 - If a `keychain://` entry is missing, export fails and writes nothing.
-- `-o` creates the file readable only by you and never overwrites one. If git doesn't ignore the file, kcm warns.
+- `-o` creates the file readable only by you and never overwrites one. It refuses a folder other users can write to, unless it has the sticky bit like `/tmp`. If git doesn't ignore the file, kcm warns.
 - Without `-o` or `-c`, the output opens in `less` in a terminal, like `kcm use --full`, so secrets don't stay in your scrollback. When piped, kcm prints it as is.
 
 The file holds your secrets in plain text. Pasting from the clipboard into a password manager or a secure note is safer than sending a file around.
