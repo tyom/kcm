@@ -276,7 +276,7 @@ byte_length() {
 # Kind "kcm secret" and creator "kcm " mark kcm's entries; these attributes are not encrypted.
 store_secret() {
   local name="$1" value="$2" comment="${3:-Added by kcm}" hint="${4:-}" account hex cmd got old
-  local update=() target=() status keychain_arg=""
+  local update=() target=() status keychain_arg="" keep=false
   if select_keychain_item "$name"; then
     account="$_KCM_ITEM_ACCOUNT"
     target=("$_KCM_ITEM_KEYCHAIN")
@@ -284,10 +284,11 @@ store_secret() {
     keychain_arg=" $(security_quote "$_KCM_ITEM_KEYCHAIN")"
     # A hint someone wrote outlives a new value; kcm's own comments are replaced.
     # Without a new hint, a failed lookup stops the write so it can't drop the old one.
+    # A kept hint is left out of the update: security then leaves it as it is, newlines and all.
     if [ -z "$hint" ]; then
       old=$(item_comment "$name") || { [ "$?" -ne 2 ] || return 1; }
       if [ -n "$old" ] && [[ "$old" != "Added by kcm" && "$old" != "Imported by kcm"* ]]; then
-        comment="$old"
+        keep=true
       fi
     fi
   else
@@ -296,25 +297,37 @@ store_secret() {
     account="$USER"
   fi
   if [ -n "$hint" ]; then comment="$hint"; fi
+  # One line, as security -i needs, so the read-back below compares like with like
+  comment="${comment//$'\n'/ }"
   hex=$(printf '%s' "$value" | xxd -p | tr -d '\n')
-  cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
+  local comment_args=() comment_cmd=""
+  if [ "$keep" = false ]; then
+    comment_args=(-j "$comment")
+    comment_cmd=" -j $(security_quote "$comment")"
+  fi
+  cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \"$comment_cmd -X $hex$keychain_arg"
   # security -i silently truncates lines over 4095 bytes. Drop the source path before
   # giving up on stdin, so the metadata never pushes a value onto argv.
-  if [ "$(byte_length "$cmd")" -ge 4096 ] && [[ "$comment" == "Imported by kcm from "* ]]; then
+  if [ "$(byte_length "$cmd")" -ge 4096 ] && [ "$keep" = false ] && [[ "$comment" == "Imported by kcm from "* ]]; then
     comment="Imported by kcm"
+    comment_args=(-j "$comment")
     cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
   fi
   if [ "$(byte_length "$cmd")" -lt 4096 ]; then
     printf '%s\n' "$cmd" | security -i >/dev/null 2>&1
   else
     # shortcut: security -i reads at most 4095 bytes per line, so values over ~2 KB still go through argv
-    security add-generic-password ${update[@]+"${update[@]}"} -s "$name" -a "$account" -D "kcm secret" -c "kcm " -j "$comment" \
+    security add-generic-password ${update[@]+"${update[@]}"} -s "$name" -a "$account" -D "kcm secret" -c "kcm " ${comment_args[@]+"${comment_args[@]}"} \
       -X "$hex" ${target[@]+"${target[@]}"} >/dev/null 2>&1 || return 1
   fi
   # security -i exits 0 even when the command fails, so read the value back.
   # The x keeps trailing newlines that $(...) would strip.
   got=$(read_secret "$name" && printf x) || return 1
-  [ "$got" = "${value}x" ]
+  [ "$got" = "${value}x" ] || return 1
+  # The value alone can match after a failed write, as when only the hint changes
+  [ "$keep" = true ] && return 0
+  select_keychain_item "$name" || return 1
+  [ "$(item_comment "$name")" = "$comment" ]
 }
 
 # Print a secret's value.

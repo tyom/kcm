@@ -202,8 +202,26 @@ echo "hinted5" | PATH="$TEST_DIR/failcomment:$PATH" "$SCRIPT_PATH" add "${TEST_K
 assert_exit_code 1 "$exit_code" "add fails when the old hint can't be read"
 assert_contains "$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)" '"icmt"<blob>="Keep me"' "A failed hint lookup leaves the hint alone"
 assert_equals "hinted4" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A failed hint lookup leaves the value alone"
-echo "hinted6" | PATH="$TEST_DIR/failcomment:$PATH" "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "New hint" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
-assert_exit_code 0 "$exit_code" "add -c works when the old hint can't be read"
+
+# A comment with newlines, as Keychain Access can write, survives a new value byte for byte
+security add-generic-password -U -s "${TEST_KEY}_HINT" -a "$USER" -j $'Dashboard\nRotate monthly\n' -w multiline >/dev/null 2>&1
+echo "hinted7" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - >/dev/null 2>&1
+assert_contains "$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)" '"icmt"<blob>=0x44617368626F6172640A526F74617465206D6F6E74686C790A ' "Re-adding without -c leaves a multi-line comment unchanged"
+assert_equals "hinted7" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "Re-adding next to a multi-line comment updates the value"
+
+# security -i exits 0 when its command fails; the same value with a new hint must not pass as stored
+mkdir -p "$TEST_DIR/nowrite"
+cat > "$TEST_DIR/nowrite/security" << 'EOF'
+#!/bin/bash
+# Drop every write: -i reads the command and does nothing, add-generic-password does nothing
+if [ "${1:-}" = -i ]; then cat >/dev/null; exit 0; fi
+[ "${1:-}" = add-generic-password ] && exit 0
+exec /usr/bin/security "$@"
+EOF
+chmod +x "$TEST_DIR/nowrite/security"
+echo "hinted7" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Old hint" >/dev/null 2>&1
+echo "hinted7" | PATH="$TEST_DIR/nowrite:$PATH" "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "New hint" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "add fails when the hint was not stored, even if the value matches"
 
 # A hint can hold escape codes, written by kcm or another tool; ls must not send them to the terminal
 echo "hinted5" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c $'bad\033[2Jhint' >/dev/null 2>&1
