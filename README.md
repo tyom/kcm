@@ -125,7 +125,7 @@ kcm export                    # view it in less
 kcm export -e .env.local | …  # or pipe it
 ```
 
-`export` loads the same files as `kcm use`, and variables already in your environment win in the same way. It writes one `NAME='value'` line per variable, in quotes that kcm and dotenv both read as is, so `kcm use -e shared.env` gives the same values back. Values that contain `'` use double quotes instead.
+`export` loads the same files as `kcm use`, and variables already in your environment win in the same way. When one hides a different value from the file, kcm names it in a warning, because that shell value is what the export contains. `--override` writes the file's value instead. Export writes one `NAME='value'` line per variable, in quotes that kcm and dotenv both read as is, so `kcm use -e shared.env` gives the same values back. Values that contain `'` use double quotes instead.
 
 - If a `keychain://` entry is missing, export fails and writes nothing.
 - `-o` creates the file readable only by you and never overwrites one. It refuses a folder other users can write to, unless it has the sticky bit and you or root own it, like `/tmp`. It doesn't check parent folders or ACLs, so export into your own folders (see [SECURITY.md](SECURITY.md)). If git doesn't ignore the file, kcm warns.
@@ -169,6 +169,14 @@ Without `--env-file`, `kcm use` searches from the current folder up to the git r
 `--env-file` loads exactly one file and skips the search.
 
 Variables already set in your environment win over env files, as with dotenv. kcm doesn't look them up in the Keychain, so `DATABASE_URL=postgres://localhost/test kcm use -- npm test` uses that URL without a Keychain prompt. This also means a script run through `kcm use` can call `kcm use` again without loading secrets twice.
+
+When a variable in your shell hides a different value from an env file, `kcm use` names it before the command starts:
+
+```
+ℹ Warning: set in your shell, so the env file value is not used: AWS_ACCESS_KEY_ID (--override uses the file)
+```
+
+The command still runs with the shell's value. Add `--override` to make the env files win. kcm can't compare a `keychain://` reference with your shell's value without a Keychain lookup, so it warns about any reference your shell hides, except one an outer `kcm use` loaded and nothing has changed since.
 
 ### Optional kcm in shared scripts
 
@@ -263,9 +271,10 @@ Parsing rules:
 
 - Values are passed to the command as plain text. kcm never runs them through a shell, so `$`, `&` or `;` in a value stay as they are.
 - Single or double quotes around a value are removed. A quoted value can span several lines. A closing quote on a line of its own keeps the line break before it, as in dotenv.
+- Escapes are not expanded: `"a\nb"` stays a backslash and an `n`, where dotenv would make a line break. Put real line breaks in a multiline value such as a PEM key.
 - Text after the closing quote is ignored, so `API_KEY="keychain://API_KEY" # staging` works. In an unquoted value, a `#` is part of the value.
 - An unfinished quoted value stops parsing. The error names the file and opening line.
-- `kcm use` rejects assignments to Bash-managed variables such as `UID`, `RANDOM` and `IFS` before reading secrets. Variables already exported by the caller still take precedence.
+- `kcm use` rejects assignments to Bash-managed variables such as `UID`, `RANDOM` and `IFS` before reading secrets. Variables already exported by the caller still take precedence, unless you pass `--override`.
 - An `export ` prefix is allowed: `export PORT=3000`.
 - Lines starting with `#`, blank lines and lines without a valid variable name are skipped.
 - Windows (CRLF) line endings are fine.
@@ -302,16 +311,25 @@ EOF
 kcm use -- npm run dev
 ```
 
-### CI/CD Integration
+### A Separate Env File for One Script
 
 ```bash
-# Store deployment credentials
-kcm add AWS_ACCESS_KEY_ID
-kcm add AWS_SECRET_ACCESS_KEY
+# Store credentials for a staging deploy from your Mac
+kcm add STAGING_AWS_ACCESS_KEY_ID
+kcm add STAGING_AWS_SECRET_ACCESS_KEY
 
-# Deploy script
-kcm use --env-file .env.deploy -- ./deploy.sh
+# Point the names the script reads at those entries
+cat > .env.staging << EOF
+AWS_ACCESS_KEY_ID="keychain://STAGING_AWS_ACCESS_KEY_ID"
+AWS_SECRET_ACCESS_KEY="keychain://STAGING_AWS_SECRET_ACCESS_KEY"
+EOF
+
+# Run the script with only that file. --override uses its values even if
+# your shell already exports AWS credentials
+kcm use --override --env-file .env.staging -- ./deploy.sh
 ```
+
+kcm reads the Keychain of the logged-in user, so it is for your own machine, not for CI runners or production credentials (see [SECURITY.md](SECURITY.md)).
 
 ### Team Collaboration
 

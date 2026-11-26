@@ -42,7 +42,7 @@ The `use` command:
 
 1. Parses `.env` files line-by-line (never using `eval`)
 2. Merges the files, then resolves `keychain://` references in the winning values by querying the keychain, except for variables the caller already exported
-3. Exports variables not already in the environment and executes the user command via `exec`
+3. Exports variables not already in the environment (all of them with `--override`), warns about shell values that hide a different file value, and executes the user command via `exec`
 
 ## Security Architecture
 
@@ -105,14 +105,11 @@ Replaces the script process with the target command, ensuring:
 
 ### Environment Processing
 
-Uses parallel arrays (`PROCESSED_ENV_NAMES`, `PROCESSED_ENV_VALUES`) to parse everything before exporting anything.
+Uses parallel arrays (`_KCM_PROCESSED_ENV_NAMES`, `_KCM_PROCESSED_ENV_VALUES`) to parse everything before exporting anything.
 
 ### Pattern Matching
 
-Converts shell wildcards to regex and uses a two-phase filter:
-
-1. Pattern match during keychain parsing
-2. Accessibility check for each candidate
+`ls` converts shell wildcards to a regex and matches it against service names while parsing `security dump-keychain`. The dump holds attributes only, so listing never asks for Keychain access. Each match is sorted by origin: tagged by kcm, untagged as older kcm versions wrote them, or another app's. Entries from other apps are hidden.
 
 ### Error Handling
 
@@ -176,9 +173,12 @@ Helper assertions (`assert_equals`, `assert_contains`, `assert_exit_code`) provi
 ```
 kcm                  # Main executable (single file)
 test_kcm.sh          # Test suite
+release.sh           # Version bump, tag and push
+test_release.sh      # Tests for release.sh
 SECURITY.md          # User-facing security policy
 ARCHITECTURE.md      # This document
 README.md            # User documentation
+RELEASE.md           # Release process
 ```
 
 All functionality is in the single `kcm` script for easy distribution and auditing.
