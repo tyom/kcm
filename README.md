@@ -167,7 +167,7 @@ For this to work for everyone:
 
 ### Inspecting what `use` loads
 
-Run `kcm use` without a command to list the variables it would load, with the file each one comes from. Values stay hidden:
+Run `kcm use` without a command to list variable names and their source files without reading passwords from Keychain.
 
 ```
 $ kcm use
@@ -203,6 +203,8 @@ kcm ls "*_KEY"
 kcm remove OLD_API_KEY
 ```
 
+When several Keychain entries share a service name, kcm prefers its tagged entry, then a legacy entry for your user account. A single untagged entry under another account can also be used by name. If the best match is ambiguous, give the entries distinct service names in Keychain Access before retrying.
+
 ## Environment File Format
 
 Your `.env` files can use the special `keychain://` prefix to reference Keychain secrets:
@@ -225,6 +227,8 @@ Parsing rules:
 - Values are passed to the command as plain text. kcm never runs them through a shell, so `$`, `&` or `;` in a value stay as they are.
 - Single or double quotes around a value are removed. A quoted value can span several lines. A closing quote on a line of its own keeps the line break before it, as in dotenv.
 - Text after the closing quote is ignored, so `API_KEY="keychain://API_KEY" # staging` works. In an unquoted value, a `#` is part of the value.
+- An unfinished quoted value stops parsing. The error names the file and opening line.
+- `kcm use` rejects assignments to Bash-managed variables such as `UID`, `RANDOM` and `IFS` before reading secrets. Variables already exported by the caller still take precedence.
 - An `export ` prefix is allowed: `export PORT=3000`.
 - Lines starting with `#`, blank lines and lines without a valid variable name are skipped.
 - Windows (CRLF) line endings are fine.

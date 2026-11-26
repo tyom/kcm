@@ -1,103 +1,53 @@
 #!/bin/bash
-# Script to create a new release: bump the version in `kcm`, commit, tag, and push.
-# Pushing the tag triggers the Release workflow, which creates the GitHub release
-# (with the `kcm` asset) and bumps Formula/kcm.rb in tyom/homebrew-tap.
-
+# Bump the script version and publish its commit and annotated tag together.
 set -euo pipefail
 
-# Parse arguments
-DRY_RUN=false
-VERSION=""
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        *)
-            VERSION="$1"
-            shift
-            ;;
+dry_run=false
+version=""
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) dry_run=true ;;
+        *) if [ -n "$version" ]; then echo "Expected one version" >&2; exit 1; fi
+           version="$arg" ;;
     esac
 done
-
-if [ -z "$VERSION" ]; then
-    echo "Usage: $0 [--dry-run] <version>"
-    echo "Example: $0 0.5.0"
-    echo "Example: $0 --dry-run 0.5.0"
+if ! [[ "$version" =~ ^[[:alnum:]][[:alnum:].+_-]*$ ]] || ! git check-ref-format "refs/tags/v$version"; then
+    echo "Usage: $0 [--dry-run] <version>, for example 0.5.0" >&2
     exit 1
 fi
-
 if [ "$(git branch --show-current)" != main ]; then
-    echo "Run releases from main (current branch: $(git branch --show-current))"
+    echo "Run releases from main" >&2
+    exit 1
+fi
+if ! git diff --cached --quiet || ! git diff --quiet -- kcm; then
+    echo "The Git index and kcm must be clean before a release." >&2
     exit 1
 fi
 
-if [ "$DRY_RUN" = true ]; then
-    echo "DRY RUN MODE - No changes will be committed or pushed"
-    echo ""
-fi
-
-echo "Creating release v${VERSION}..."
-echo ""
-
-# Detect sed type for portability (BSD vs GNU)
-if sed --version >/dev/null 2>&1; then
-    # GNU sed
-    SED_INPLACE=(sed -i)
-else
-    # BSD sed (macOS)
-    SED_INPLACE=(sed -i '')
-fi
-
-# Update version in kcm script
-echo "Updating version in kcm script..."
-if [ "$DRY_RUN" = true ]; then
-    echo "  Would update VERSION and header comment to ${VERSION}"
-else
-    "${SED_INPLACE[@]}" "s/^_KCM_VERSION=\".*\"/_KCM_VERSION=\"${VERSION}\"/" kcm
-    "${SED_INPLACE[@]}" "s/^# Version: .*/# Version: ${VERSION}/" kcm
-fi
-
-# Commit changes
-echo "Committing changes..."
-if [ "$DRY_RUN" = true ]; then
-    echo "  Would commit: kcm"
-    echo "  Message: Release v${VERSION}"
-else
-    git add kcm
-    # Check if there are actual changes to commit
-    if git diff --cached --quiet; then
-        echo "  No changes to commit - files already at version ${VERSION}"
-        echo "  Skipping tag creation and push"
-        exit 0
+tag="v$version"
+tag_exists=false
+if git show-ref --verify --quiet "refs/tags/$tag"; then
+    tag_exists=true
+    if [ "$(git rev-parse "refs/tags/$tag^{commit}")" != "$(git rev-parse HEAD)" ] ||
+        [ "$(./kcm version)" != "kcm version $version" ]; then
+        echo "$tag already exists for a different commit or version." >&2
+        exit 1
     fi
-    git commit -m "Release v${VERSION}"
 fi
 
-# Create and push tag
-echo "Creating and pushing tag..."
-if [ "$DRY_RUN" = true ]; then
-    echo "  Would create tag: v${VERSION}"
-    echo "  Would push: origin main refs/tags/v${VERSION}"
-else
-    git tag -a "v${VERSION}" -m "Release v${VERSION}"
-    # Push only this tag, even with push.followTags or a branch of the same name
-    git push --no-follow-tags origin main "refs/tags/v${VERSION}"
+if [ "$dry_run" = true ]; then
+    echo "Would release $tag from main and push main and its tag to origin."
+    exit 0
 fi
 
-echo ""
-if [ "$DRY_RUN" = true ]; then
-    echo "DRY RUN COMPLETE - No actual changes were made"
-    echo ""
-    echo "To perform the actual release, run:"
-    echo "  $0 ${VERSION}"
-else
-    echo "Release v${VERSION} created successfully!"
-    echo ""
-    echo "The Release workflow will publish the GitHub release and bump the"
-    echo "Homebrew formula in tyom/homebrew-tap. Users can then install/upgrade with:"
-    echo "  brew install tyom/tap/kcm"
-    echo "  brew upgrade kcm"
+if [ "$(./kcm version)" != "kcm version $version" ]; then
+    if sed --version >/dev/null 2>&1; then inplace=(-i); else inplace=(-i ''); fi
+    sed "${inplace[@]}" -e "s/^_KCM_VERSION=.*/_KCM_VERSION=\"$version\"/" \
+        -e "s/^# Version: .*/# Version: $version/" kcm
+    git commit -m "Release $tag" -- kcm
 fi
+if [ "$tag_exists" = false ]; then
+    git tag -a "$tag" -m "Release $tag"
+fi
+git push --atomic --no-follow-tags origin refs/heads/main "refs/tags/$tag"
+echo "Published $tag. The Release workflow updates the GitHub release and Homebrew tap."

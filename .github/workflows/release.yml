@@ -17,7 +17,9 @@ jobs:
         run: chmod +x test_kcm.sh
 
       - name: Run tests
-        run: ./test_kcm.sh
+        run: |
+          ./test_kcm.sh
+          ./test_release.sh
 
   release:
     needs: test
@@ -34,14 +36,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" \
-            kcm \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "Install via Homebrew: \`brew install tyom/tap/kcm\`" \
-            --generate-notes
-          echo "sha256 (for the Homebrew formula):"
-          shasum -a 256 kcm
+          tag="$GITHUB_REF_NAME"
+          if asset=$(gh release view "$tag" --json assets --jq '.assets[] | select(.name == "kcm") | .name'); then
+            if [ -z "$asset" ]; then gh release upload "$tag" kcm; fi
+          else
+            gh release create "$tag" kcm --verify-tag --title "$tag" \
+              --notes "Install via Homebrew: \`brew install tyom/tap/kcm\`" --generate-notes
+          fi
+          gh release download "$tag" --pattern kcm --output - | cmp - kcm
 
+  homebrew:
+    needs: release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Bump Homebrew tap formula
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -51,11 +61,16 @@ jobs:
           sha="$(shasum -a 256 kcm | awk '{print $1}')"
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/kcm"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/tyom/homebrew-tap.git" tap
+          installed=$(sed -nE 's/^  version "([^"]+)".*/\1/p' tap/Formula/kcm.rb)
+          if [ "$installed" != "$version" ] && git merge-base --is-ancestor "$GITHUB_SHA" "refs/tags/v$installed" 2>/dev/null; then
+            echo "The tap already has a later release, $installed."
+            exit 0
+          fi
           cd tap
           f=Formula/kcm.rb
-          sed -i -E "s|^  url \".*\"|  url \"${url}\"|"             "$f"
-          sed -i -E "s|^  version \".*\"|  version \"${version}\"|" "$f"
-          sed -i -E "s|^  sha256 \".*\"|  sha256 \"${sha}\"|"       "$f"
+          sed -i '' -E "s|^  url \".*\"|  url \"${url}\"|"             "$f"
+          sed -i '' -E "s|^  version \".*\"|  version \"${version}\"|" "$f"
+          sed -i '' -E "s|^  sha256 \".*\"|  sha256 \"${sha}\"|"       "$f"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git diff --quiet || git commit -am "kcm ${version}"
