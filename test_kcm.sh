@@ -37,7 +37,7 @@ cleanup() {
         while security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1; do :; done
     done
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT HINT; do
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT HINT ACCENT; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -167,6 +167,14 @@ long_hint=$(head -c 201 /dev/zero | tr '\0' 'h')
 output=$(echo "hinted3" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "$long_hint" 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 1 "$exit_code" "add -c refuses a hint over 200 characters"
 assert_equals "hinted2" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A refused hint leaves the value alone"
+
+# security -i cuts a line at 4095 bytes, not characters: 200 emoji are 800 bytes
+emoji_hint=$(printf '🙂%.0s' $(seq 200))
+big_value=$(head -c 1700 /dev/zero | tr '\0' 'v')
+echo "$big_value" | LC_ALL=en_US.UTF-8 "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "$emoji_hint" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 0 "$exit_code" "add stores a value whose command is under 4096 characters but over 4095 bytes"
+assert_equals "$big_value" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A long non-ASCII hint does not cut the value short"
+echo "hinted2" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Stripe test key from the dashboard" >/dev/null 2>&1
 
 # ls shows hints next to names, but not kcm's own comments
 output=$("$SCRIPT_PATH" ls "${TEST_KEY}*" 2>&1 | strip_ansi | tr -s ' ')
@@ -642,6 +650,14 @@ assert_equals "$(printf '# config\n%s="keychain://%s"\nPORT=3000' "${TEST_KEY}_A
 attrs=$(security find-generic-password -s "${TEST_KEY}_API_KEY" 2>&1)
 assert_contains "$attrs" "\"icmt\"<blob>=\"Imported by kcm from $(cd "$IMP" && pwd -P)/.env\"" "Imported secret's comment names its source file"
 assert_contains "$attrs" '"desc"<blob>="kcm secret"' "Imported secret has kind 'kcm secret'"
+
+# security prints a comment with non-ASCII text as hex; ls must still hide kcm's own
+ACC="$TEST_DIR/café"
+mkdir -p "$ACC"
+echo "${TEST_KEY}_ACCENT=sk-test-789" > "$ACC/.env"
+(cd "$ACC" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "sk-test-789" "$("$SCRIPT_PATH" show "${TEST_KEY}_ACCENT" 2>&1)" "Import works from a folder with an accented name"
+assert_not_contains "$("$SCRIPT_PATH" ls "${TEST_KEY}_ACCENT" 2>&1)" "Imported by kcm" "ls hides kcm's import comment when the path has accented letters"
 
 # A newline in the source path must not start a second security -i command
 INJ="$TEST_DIR/inj"$'\n'"add-generic-password -s ${TEST_KEY}_INJECTED -a x -w y"$'\n'"z"

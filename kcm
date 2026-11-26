@@ -264,6 +264,11 @@ security_quote() {
   printf '"%s"' "${s//\"/\\\"}"
 }
 
+# Byte length of a string. ${#s} counts characters in a UTF-8 locale, and security -i limits bytes.
+byte_length() {
+  printf '%s' "$1" | wc -c
+}
+
 # Store a secret, creating or updating it in place. COMMENT is kcm's own note; HINT is
 # the user's and replaces any comment. Without HINT, an existing hint is kept.
 # The value goes in as hex on stdin so it never shows in the process list.
@@ -290,11 +295,11 @@ store_secret() {
   cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
   # security -i silently truncates lines over 4095 bytes. Drop the source path before
   # giving up on stdin, so the metadata never pushes a value onto argv.
-  if [ ${#cmd} -ge 4096 ] && [[ "$comment" == "Imported by kcm from "* ]]; then
+  if [ "$(byte_length "$cmd")" -ge 4096 ] && [[ "$comment" == "Imported by kcm from "* ]]; then
     comment="Imported by kcm"
     cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
   fi
-  if [ ${#cmd} -lt 4096 ]; then
+  if [ "$(byte_length "$cmd")" -lt 4096 ]; then
     printf '%s\n' "$cmd" | security -i >/dev/null 2>&1
   else
     # shortcut: security -i reads at most 4095 bytes per line, so values over ~2 KB still go through argv
@@ -1474,8 +1479,9 @@ keychain_services() {
           if (crtr == "kcm ") origin = "kcm"
           else if (crtr == "<NULL>" && desc == "<NULL>" && acct == user && svc ~ /^[A-Za-z][A-Za-z0-9_]*$/) origin = "legacy"
           else origin = "other"
-          # A hint follows one tab, or two when security printed it as hex
-          if (origin != "kcm" || cmt == "Added by kcm" || cmt ~ /^Imported by kcm/) cmt = ""
+          # A hint follows one tab, or two when security printed it as hex.
+          # 496D...6D is "Imported by kcm" in hex, for a source path with non-ASCII text.
+          if (origin != "kcm" || cmt == "Added by kcm" || cmt ~ /^(Imported by kcm|\t496D706F72746564206279206B636D)/) cmt = ""
           if (ENVIRON["KCM_LABEL"] == "") print origin " " svc (cmt == "" ? "" : "\t" cmt)
           else if (svc == ENVIRON["KCM_LABEL"]) {
             if (origin == "kcm") rank = 3
