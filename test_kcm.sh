@@ -609,6 +609,13 @@ output=$(RANDOM=1 "$SCRIPT_PATH" use --override -e "$TEST_DIR/random.env" -- tru
 assert_contains "$output" "RANDOM is managed by Bash" "--override rejects RANDOM even when the caller exports it"
 assert_equals "no" "$([ -e "$TEST_DIR/random-ran" ] && echo yes || echo no)" "--override does not evaluate an env file's RANDOM"
 
+# Bash truncates the file named by HISTFILE when HISTFILESIZE is assigned
+printf 'one\ntwo\n' > "$TEST_DIR/history"
+printf 'HISTFILE=%s/history\nHISTFILESIZE=0\n' "$TEST_DIR" > "$TEST_DIR/histfilesize.env"
+output=$(env -u HISTFILE -u HISTFILESIZE "$SCRIPT_PATH" use -e "$TEST_DIR/histfilesize.env" -- true 2>&1) && exit_code=0 || exit_code=$?
+assert_contains "$output" "HISTFILESIZE is managed by Bash" "Rejects HISTFILESIZE from an env file"
+assert_equals "$(printf 'one\ntwo')" "$(cat "$TEST_DIR/history")" "An env file's HISTFILESIZE does not truncate HISTFILE"
+
 printf 'FIRST=keychain://%s_MISSING\nUID=1000\n' "$TEST_KEY" > "$TEST_DIR/managed.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/managed.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
 assert_exit_code 1 "$exit_code" "Rejects a Bash-managed name"

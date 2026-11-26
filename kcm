@@ -735,7 +735,8 @@ use_secrets() {
       # Bash sets these but they are plain, writable variables. Not OPTIND: it is an integer
       # variable, and Bash evaluates an assignment to one as arithmetic, which can run commands
       HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|OPTERR) continue ;;
-      BASH_ENV|BASH_XTRACEFD|BASH_REMATCH|OPTARG|POSIXLY_CORRECT|PS4) ;;
+      # HISTFILESIZE: assigning it truncates the file named by HISTFILE
+      BASH_ENV|BASH_XTRACEFD|BASH_REMATCH|OPTARG|POSIXLY_CORRECT|PS4|HISTFILESIZE) ;;
       *)
         if [ "$_kcm_inherited" = true ]; then
           # An ordinary variable from the caller has the export attribute alone. Bash's own carry
