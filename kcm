@@ -1339,14 +1339,17 @@ list_secrets() {
 
   # Other apps' entries are left out
   local -a ours=() legacy=()
-  local origin service
+  local origin service services
+  # One line per service; on a name clash kcm sorts before legacy and other, so it wins.
+  # Captured first: < <(...) would hide a keychain that failed to dump.
+  services=$(keychain_services "$grep_pattern" | LC_ALL=C sort -k2,2 -k1,1 | awk '!seen[$2]++') \
+    || error_exit "Could not read every keychain in the search list"
   while read -r origin service; do
     case "$origin" in
       kcm) ours+=("$service") ;;
       legacy) legacy+=("$service") ;;
     esac
-  # One line per service; on a name clash kcm sorts before legacy and other, so it wins
-  done < <(keychain_services "$grep_pattern" | LC_ALL=C sort -k2,2 -k1,1 | awk '!seen[$2]++')
+  done <<< "$services"
 
   if [ ${#ours[@]} -eq 0 ] && [ ${#legacy[@]} -eq 0 ]; then
     echo "  No secrets found matching pattern '$pattern'"

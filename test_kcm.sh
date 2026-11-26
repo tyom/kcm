@@ -161,6 +161,17 @@ output=$("$SCRIPT_PATH" ls 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "List command exits successfully"
 assert_contains "$output" "$TEST_KEY" "List shows test key"
 
+# A keychain that can't be dumped makes ls fail instead of printing a partial list
+mkdir -p "$TEST_DIR/faildump"
+cat > "$TEST_DIR/faildump/security" << 'EOF'
+#!/bin/bash
+[ "${1:-}" = dump-keychain ] && exit 1
+exec /usr/bin/security "$@"
+EOF
+chmod +x "$TEST_DIR/faildump/security"
+PATH="$TEST_DIR/faildump:$PATH" "$SCRIPT_PATH" ls >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "List fails when a keychain can't be read"
+
 # ls shows kcm's entries, then untagged ones from older kcm versions, and hides other apps' entries
 security add-generic-password -s "${TEST_KEY}_LEGACY" -a "$USER" -w old >/dev/null 2>&1
 security add-generic-password -s "${TEST_KEY}_OTHER_APP" -a "some-app" -w x >/dev/null 2>&1
