@@ -130,7 +130,7 @@ assert_contains "$output" "USAGE:" "Help shows usage"
 output=$("$SCRIPT_PATH" help 2>&1)
 assert_not_contains "$output" $'\033' "Piped help has no colour codes"
 output=$(NO_COLOR='' script -q /dev/null "$SCRIPT_PATH" help </dev/null 2>&1)
-assert_contains "$output" $'\033[1;97;100m add ' "Help in a terminal shows commands as chips"
+assert_contains "$output" $'\033[1;38;5;234;48;5;250m add ' "Help in a terminal shows commands as chips"
 
 # Test 2: Version command
 output=$("$SCRIPT_PATH" version 2>&1) && exit_code=$? || exit_code=$?

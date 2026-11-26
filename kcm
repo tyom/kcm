@@ -1576,15 +1576,15 @@ list_secrets() {
   fi
 }
 
-# Colour help text for a terminal: commands as bright white chips on grey, flags green,
-# arguments cyan, comments grey.
+# Colour help text for a terminal: commands as dark chips on light grey (fixed 256
+# colours, so no theme can wash them out), flags green, arguments cyan, comments grey.
 # Piped help stays plain so scripts (and show_command_help) can parse it.
 colorize_help() {
   if [ ! -t 1 ] || [ -n "${NO_COLOR:-}" ]; then
     cat
     return
   fi
-  awk -v B=$'\033[1m' -v C=$'\033[1;97;100m' -v F=$'\033[32m' -v A=$'\033[36m' -v D=$'\033[90m' -v N=$'\033[0m' '
+  awk -v B=$'\033[1m' -v C=$'\033[1;38;5;234;48;5;250m' -v F=$'\033[32m' -v A=$'\033[36m' -v D=$'\033[90m' -v N=$'\033[0m' '
     # Placeholders ([PATH], <command>, FILE) in cyan, flags (-e, --env-file, --) in green
     function args(s) {
       gsub(/[<[][A-Za-z][A-Za-z_.]*[]>]/, A "&" N, s)
