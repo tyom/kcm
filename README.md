@@ -8,6 +8,9 @@ A secure command-line utility for managing secrets in macOS Keychain with seamle
 
 - **Secure Storage**: Store sensitive data in macOS Keychain instead of plain text files
 - **Environment Integration**: Seamlessly resolve `keychain://` placeholders in `.env` files
+- **Env File Discovery**: Find and merge `.env` files from the current folder up to the git root. Variables already in your environment win
+- **Import**: Move plain values from `.env` files into Keychain and replace them with `keychain://` references
+- **Inspection**: Run `kcm use` without a command to see which variables would load and where each comes from
 - **Clipboard Management**: Copy secrets to clipboard with automatic clearing after 45 seconds
 - **Pattern Matching**: List and search secrets using wildcards
 - **Simple CLI**: Intuitive commands for adding, removing, and managing secrets
@@ -338,9 +341,12 @@ If a secret seems stuck or corrupted:
 # Remove using kcm
 kcm remove KEY_NAME
 
-# Or remove directly via security command
-security delete-generic-password -s "KEY_NAME"
+# Or remove directly via security command. Give the account, because
+# without -a it deletes the first entry with that name, whoever owns it.
+security delete-generic-password -s "KEY_NAME" -a "$USER"
 ```
+
+If `kcm remove` says the name is ambiguous, open Keychain Access, find the entries with that name, and delete or rename the one you no longer need.
 
 ## Development
 
