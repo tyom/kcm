@@ -37,7 +37,7 @@ cleanup() {
         while security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1; do :; done
     done
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY; do
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -460,6 +460,9 @@ assert_equals "caller caller caller" "$output" "Exported names kcm uses internal
 printf 'value=file\nname=file\n' > "$TEST_DIR/names.env"
 output=$(value=caller name=caller "$SCRIPT_PATH" use --env-file "$TEST_DIR/names.env" --full 2>/dev/null | tr '\n' ' ')
 assert_equals "name=caller value=caller " "$output" "Listing shows exported values for names kcm uses internally"
+printf '_kcm_name=file\n' > "$TEST_DIR/reserved.env"
+output=$(_kcm_name=caller "$SCRIPT_PATH" use --env-file "$TEST_DIR/reserved.env" --full 2>&1 | cat)
+assert_contains "$output" "_kcm_name is reserved by kcm" "Listing refuses kcm's prefix even when exported"
 
 output=$(FOO=shell-value-at-least-24-chars "$SCRIPT_PATH" use --env-file "$TEST_ENV" -s 2>/dev/null)
 assert_equals "FOO=shel…hars" "$output" "Listing shows the environment value"
@@ -799,6 +802,79 @@ echo "Test Group: Pattern Matching"
 echo "----------------------------"
 
 # Add test secrets for pattern matching
+echo
+echo "Test Group: Export"
+echo "------------------"
+
+# A reference, a multiline value, a value with ' and a literal \n that dotenv would expand in "..."
+printf 'exported-secret' | "$SCRIPT_PATH" add "${TEST_KEY}_EXPORT" - >/dev/null 2>&1
+cat > "$TEST_DIR/export.env" <<EOF
+REF=keychain://${TEST_KEY}_EXPORT
+PEM="-----BEGIN-----
+abc
+-----END-----"
+QUOTE="it's here"
+SLASH='back\n slash'
+EOF
+expected=$("$SCRIPT_PATH" use -e "$TEST_DIR/export.env" --full 2>/dev/null | cat)
+"$SCRIPT_PATH" export -e "$TEST_DIR/export.env" -o "$TEST_DIR/exported.env" 2>/dev/null
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/exported.env" --full 2>/dev/null | cat)
+assert_contains "$expected" "REF=exported-secret" "Export test resolves the reference"
+assert_equals "$expected" "$output" "Exported file reads back to the same values"
+assert_equals "600" "$(stat -f %Lp "$TEST_DIR/exported.env")" "Exported file is readable only by its owner"
+
+before=$(cat "$TEST_DIR/exported.env")
+output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export.env" -o "$TEST_DIR/exported.env" 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Export refuses an existing file"
+assert_equals "$before" "$(cat "$TEST_DIR/exported.env")" "Existing file is left unchanged"
+
+printf 'OK=1\nGONE=keychain://%s_MISSING\n' "$TEST_KEY" > "$TEST_DIR/export-missing.env"
+output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export-missing.env" -o "$TEST_DIR/missing-out.env" 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Export fails on a missing Keychain entry"
+assert_contains "$output" "GONE" "Names the variable with the missing entry"
+[ -e "$TEST_DIR/missing-out.env" ] && fail "Writes no file when an entry is missing" || pass "Writes no file when an entry is missing"
+
+printf "BOTH=a'b\"c\n" > "$TEST_DIR/export-both.env"
+output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export-both.env" 2>&1 | cat) && exit_code=0 || exit_code=$?
+assert_contains "$output" "Cannot quote BOTH" "Export fails on a value it can't quote"
+
+# dotenv turns any carriage return into a newline, so the value would not read back
+printf 'CR=a\rb\n' > "$TEST_DIR/export-cr.env"
+output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export-cr.env" 2>&1 | cat)
+assert_contains "$output" "Cannot quote CR" "Export fails on a value with a carriage return"
+
+# Exported names that match kcm's own variable names keep their values
+printf 'name=file\nvalue=file\nk=file\nenv_file=file\ntext=file\ncount=file\n' > "$TEST_DIR/export-names.env"
+output=$(name=caller value=caller k=caller env_file=caller text=caller count=caller \
+    "$SCRIPT_PATH" export -e "$TEST_DIR/export-names.env" 2>/dev/null | tr '\n' ' ')
+assert_equals "name='caller' value='caller' k='caller' env_file='caller' text='caller' count='caller' " "$output" "Export keeps exported values for names kcm uses internally"
+
+# kcm's own prefix is reserved, even when the caller exports it
+printf '_kcm_name=file\n' > "$TEST_DIR/export-reserved.env"
+output=$(_kcm_name=caller "$SCRIPT_PATH" export -e "$TEST_DIR/export-reserved.env" 2>&1 | cat)
+assert_contains "$output" "_kcm_name is reserved by kcm" "Export refuses a name with kcm's prefix"
+assert_not_contains "$output" "_kcm_name=" "Reserved name prints no value"
+
+# Another user could swap the temp file in a folder they can write to, unless it is sticky
+mkdir -p "$TEST_DIR/shared" "$TEST_DIR/sticky"
+chmod 777 "$TEST_DIR/shared"; chmod 1777 "$TEST_DIR/sticky"
+output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export.env" -o "$TEST_DIR/shared/out.env" 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Export refuses a folder others can write to"
+[ -e "$TEST_DIR/shared/out.env" ] && fail "Writes nothing to a folder others can write to" || pass "Writes nothing to a folder others can write to"
+"$SCRIPT_PATH" export -e "$TEST_DIR/export.env" -o "$TEST_DIR/sticky/out.env" >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+assert_exit_code 0 "$exit_code" "Export writes to a sticky folder"
+ln -s shared "$TEST_DIR/shared-link"
+output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export.env" -o "$TEST_DIR/shared-link/out.env" 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Export checks the folder a symlink points to"
+
+# In a terminal the text goes to less; this stand-in records what it was given
+mkdir -p "$TEST_DIR/bin"
+printf '#!/bin/sh\ncat > "%s/paged.txt"\n' "$TEST_DIR" > "$TEST_DIR/bin/less"
+chmod +x "$TEST_DIR/bin/less"
+output=$(PATH="$TEST_DIR/bin:$PATH" script -q /dev/null "$SCRIPT_PATH" export -e "$TEST_DIR/export.env" 2>&1)
+assert_not_contains "$output" "exported-secret" "Export in a terminal prints no values directly"
+assert_equals "$(cat "$TEST_DIR/exported.env")" "$(cat "$TEST_DIR/paged.txt" 2>/dev/null)" "Export in a terminal opens the quoted text in less"
+
 echo "value1" | "$SCRIPT_PATH" add "${TEST_KEY}_TEST_PATTERN_ONE" - >/dev/null 2>&1
 echo "value2" | "$SCRIPT_PATH" add "${TEST_KEY}_TEST_PATTERN_TWO" - >/dev/null 2>&1
 echo "value3" | "$SCRIPT_PATH" add "${TEST_KEY}_OTHER_PATTERN" - >/dev/null 2>&1

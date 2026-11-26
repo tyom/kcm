@@ -10,6 +10,7 @@ A secure command-line utility for managing secrets in macOS Keychain with seamle
 - **Environment Integration**: Seamlessly resolve `keychain://` placeholders in `.env` files
 - **Env File Discovery**: Find and merge `.env` files from the current folder up to the git root. Variables already in your environment win
 - **Import**: Move plain values from `.env` files into Keychain and replace them with `keychain://` references
+- **Export**: Resolve env files into plain values in a file or on the clipboard, for example to share them
 - **Inspection**: Run `kcm use` without a command to see which variables would load and where each comes from
 - **Clipboard Management**: Copy secrets to clipboard with automatic clearing after 45 seconds
 - **Pattern Matching**: List and search secrets using wildcards
@@ -98,6 +99,25 @@ Use ↑/↓ (or `j`/`k`) to move, Space to tick or untick, `a` to tick all (or u
 - After a final confirmation, kcm stores each value, reads it back, and only then replaces its line with `NAME="keychain://LABEL"`. A comment after the value goes with it. Other lines stay as they are. kcm keeps no backup, since it would hold the plain values.
 - Without `-e`, every `.env` and `.env.*` file is scanned, not only the current `NODE_ENV`. Files ending in `.example`, `.sample` or `.template` are skipped.
 - Quitting at any prompt changes nothing.
+
+### Exporting resolved values
+
+Turn your env files back into plain values, for example to give them to someone without kcm:
+
+```bash
+kcm export -c                 # copy to clipboard, cleared after 45 seconds
+kcm export -o shared.env      # write a new file
+kcm export                    # view it in less
+kcm export -e .env.local | …  # or pipe it
+```
+
+`export` loads the same files as `kcm use`, and variables already in your environment win in the same way. It writes one `NAME='value'` line per variable, in quotes that kcm and dotenv both read as is, so `kcm use -e shared.env` gives the same values back. Values that contain `'` use double quotes instead.
+
+- If a `keychain://` entry is missing, export fails and writes nothing.
+- `-o` creates the file readable only by you and never overwrites one. It refuses a folder other users can write to, unless it has the sticky bit and you or root own it, like `/tmp`. It doesn't check parent folders or ACLs, so export into your own folders (see [SECURITY.md](SECURITY.md)). If git doesn't ignore the file, kcm warns.
+- Without `-o` or `-c`, the output opens in `less` in a terminal, like `kcm use --full`, so secrets don't stay in your scrollback. When piped, kcm prints it as is.
+
+The file holds your secrets in plain text. Pasting from the clipboard into a password manager or a secure note is safer than sending a file around.
 
 ### Using Secrets in Applications
 
