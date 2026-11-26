@@ -581,6 +581,8 @@ use_secrets() {
     is_exported "$_kcm_name" && continue
     case "$_kcm_name" in
       _KCM_*|_kcm_*) error_exit "${_KCM_MERGED_SOURCES[$_kcm_k]}: $_kcm_name is reserved by kcm" ;;
+      # Bash sets these but they are plain, writable variables
+      HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|OPTIND|OPTERR) continue ;;
       BASH_ENV|BASH_XTRACEFD|BASH_REMATCH|OPTARG|POSIXLY_CORRECT) ;;
       *) declare -p "$_kcm_name" >/dev/null 2>&1 || continue ;;
     esac

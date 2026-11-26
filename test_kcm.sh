@@ -466,6 +466,11 @@ assert_exit_code 1 "$exit_code" "Rejects a Bash-managed name"
 assert_contains "$output" "$TEST_DIR/managed.env: UID is managed by Bash" "Names the file and reserved variable"
 assert_not_contains "$output" "keychain://${TEST_KEY}_MISSING" "Checks names before resolving any secrets"
 
+# Bash defines HOSTNAME without exporting it, but setting it is harmless and common.
+printf 'HOSTNAME=0.0.0.0\n' > "$TEST_DIR/hostname.env"
+output=$(env -u HOSTNAME "$SCRIPT_PATH" use -e "$TEST_DIR/hostname.env" -- sh -c 'echo "$HOSTNAME"' 2>&1)
+assert_equals "0.0.0.0" "$output" "Passes HOSTNAME from a .env file"
+
 printf 'CATALOGUE=keychain://%s_MISSING\n' "$TEST_KEY" > "$TEST_DIR/catalogue.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/catalogue.env" 2>&1)
 assert_contains "$output" "CATALOGUE" "Lists names from files with Keychain references"
