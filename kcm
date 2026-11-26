@@ -647,40 +647,44 @@ use_secrets() {
 
 # Print each merged variable as NAME='value', in quotes both kcm and dotenv read literally.
 # dotenv expands \n and \r inside "...", so "..." is only used for values with ' and neither of those.
+# A carriage return can't be kept: dotenv turns it into a newline and kcm drops it at a line end.
+# Locals use the _kcm_ prefix, so they can't hide an exported variable that printenv reads.
 format_env_file() {
-  local k name value
-  for k in "${!_KCM_MERGED_NAMES[@]}"; do
-    name="${_KCM_MERGED_NAMES[$k]}"
-    value="${_KCM_MERGED_VALUES[$k]}"
+  local _kcm_k _kcm_name _kcm_value
+  for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
+    _kcm_name="${_KCM_MERGED_NAMES[$_kcm_k]}"
+    _kcm_value="${_KCM_MERGED_VALUES[$_kcm_k]}"
     # printenv adds one newline; the x keeps any newlines of the value itself
-    if is_exported "$name"; then value=$(printenv "$name"; echo x); value="${value%$'\nx'}"; fi
-    if [[ "$value" != *"'"* ]]; then
-      printf "%s='%s'\n" "$name" "$value"
-    elif [[ "$value" != *'"'* && "$value" != *'\n'* && "$value" != *'\r'* ]]; then
-      printf '%s="%s"\n' "$name" "$value"
+    if is_exported "$_kcm_name"; then _kcm_value=$(printenv "$_kcm_name"; echo x); _kcm_value="${_kcm_value%$'\nx'}"; fi
+    if [[ "$_kcm_value" == *$'\r'* ]]; then
+      error_exit "Cannot quote $_kcm_name for an env file: its value has a carriage return"
+    elif [[ "$_kcm_value" != *"'"* ]]; then
+      printf "%s='%s'\n" "$_kcm_name" "$_kcm_value"
+    elif [[ "$_kcm_value" != *'"'* && "$_kcm_value" != *'\n'* && "$_kcm_value" != *'\r'* ]]; then
+      printf '%s="%s"\n' "$_kcm_name" "$_kcm_value"
     else
-      error_exit "Cannot quote $name for an env file: its value has ' and also \" or a literal \\\\n or \\\\r"
+      error_exit "Cannot quote $_kcm_name for an env file: its value has ' and also \" or a literal \\\\n or \\\\r"
     fi
   done
 }
 
 # Resolve env files and write them as plain values to a file, the clipboard or a pipe
 export_secrets() {
-  local env_file="" out="" to_clipboard=false
+  local _kcm_env_file="" _kcm_out="" _kcm_to_clipboard=false
   while [ $# -gt 0 ]; do
     case "$1" in
       -e|--env-file)
         [ -n "${2:-}" ] || error_exit "-e/--env-file requires an argument"
-        env_file="$2"
+        _kcm_env_file="$2"
         shift 2
         ;;
       -o|--output)
         [ -n "${2:-}" ] || error_exit "-o/--output requires an argument"
-        out="$2"
+        _kcm_out="$2"
         shift 2
         ;;
       -c|--copy)
-        to_clipboard=true
+        _kcm_to_clipboard=true
         shift
         ;;
       *)
@@ -689,39 +693,45 @@ export_secrets() {
     esac
   done
   # Checked before any Keychain prompt
-  if [ -n "$out" ] && [ "$to_clipboard" = true ]; then
+  if [ -n "$_kcm_out" ] && [ "$_kcm_to_clipboard" = true ]; then
     error_exit "Use either -o or -c, not both"
   fi
-  if [ -n "$out" ] && { [ -e "$out" ] || [ -L "$out" ]; }; then
-    error_exit "'$out' already exists"
+  if [ -n "$_kcm_out" ] && { [ -e "$_kcm_out" ] || [ -L "$_kcm_out" ]; }; then
+    error_exit "'$_kcm_out' already exists"
   fi
 
-  load_env_files "$env_file"
+  load_env_files "$_kcm_env_file"
   resolve_env_values strict
-  local text count=${#_KCM_MERGED_NAMES[@]}
+  local _kcm_text _kcm_count=${#_KCM_MERGED_NAMES[@]}
   # The x keeps the final newline; the subshell's error_exit stops kcm too
-  text=$(format_env_file && printf x) || exit 1
-  text="${text%x}"
+  _kcm_text=$(format_env_file && printf x) || exit 1
+  _kcm_text="${_kcm_text%x}"
 
-  if [ "$to_clipboard" = true ]; then
-    copy_to_clipboard "$text"
-    success "Copied $count variables to clipboard"
+  if [ "$_kcm_to_clipboard" = true ]; then
+    copy_to_clipboard "$_kcm_text"
+    success "Copied $_kcm_count variables to clipboard"
     info "Clipboard will be cleared in 45 seconds for security"
-  elif [ -n "$out" ]; then
-    # umask 077 makes the file 600; noclobber fails if it appeared since the check above
-    ( umask 077; set -C; printf '%s' "$text" > "$out" ) || error_exit "Cannot write '$out'"
-    success "Exported $count variables to $out"
-    local ignored=0
-    git -C "$(dirname "$out")" check-ignore -q -- "$(basename "$out")" 2>/dev/null || ignored=$?
+  elif [ -n "$_kcm_out" ]; then
+    # mktemp creates a new 600 file; ln then fails on any existing entry, FIFOs included,
+    # even one that appeared since the check above
+    _KCM_EXPORT_TMP=$(mktemp "$(dirname "$_kcm_out")/.kcm-export.XXXXXX") || error_exit "Cannot write '$_kcm_out'"
+    trap 'rm -f "${_KCM_EXPORT_TMP:-}"' EXIT
+    trap 'exit 130' INT TERM
+    if ! printf '%s' "$_kcm_text" > "$_KCM_EXPORT_TMP" || ! ln "$_KCM_EXPORT_TMP" "$_kcm_out" 2>/dev/null; then
+      error_exit "Cannot write '$_kcm_out'"
+    fi
+    success "Exported $_kcm_count variables to $_kcm_out"
+    local _kcm_ignored=0
+    git -C "$(dirname "$_kcm_out")" check-ignore -q -- "$(basename "$_kcm_out")" 2>/dev/null || _kcm_ignored=$?
     # 1: inside a repo and not ignored (128: not a repo)
-    if [ "$ignored" -eq 1 ]; then
-      info "Warning: git doesn't ignore $out, so it could be committed"
+    if [ "$_kcm_ignored" -eq 1 ]; then
+      info "Warning: git doesn't ignore $_kcm_out, so it could be committed"
     fi
   elif [ -t 1 ]; then
     # Same pager as use --full, so the values stay out of terminal scrollback
-    printf '%s' "$text" | less -R -+F -+X || true
+    printf '%s' "$_kcm_text" | less -R -+F -+X || true
   else
-    printf '%s' "$text"
+    printf '%s' "$_kcm_text"
   fi
 }
 

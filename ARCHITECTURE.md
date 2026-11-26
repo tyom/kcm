@@ -101,7 +101,7 @@ Replaces the script process with the target command, ensuring:
 
 ### Export
 
-`export` loads and resolves env files the same way as `use` (`load_env_files`, then `resolve_env_values strict`, which fails on a missing entry instead of keeping the reference). It builds the whole text before writing, so a failure writes nothing. Values go in single quotes because kcm's parser and dotenv both read them literally. dotenv expands `\n` and `\r` inside double quotes, so double quotes are only used for a value with `'` and neither of those. `-o` writes under `umask 077` with `noclobber`, so the file is 600 and an existing file is never replaced.
+`export` loads and resolves env files the same way as `use` (`load_env_files`, then `resolve_env_values strict`, which fails on a missing entry instead of keeping the reference). It builds the whole text before writing, so a failure writes nothing. Values go in single quotes because kcm's parser and dotenv both read them literally. dotenv expands `\n` and `\r` inside double quotes, so double quotes are only used for a value with `'` and neither of those. A value with a carriage return fails, since dotenv turns it into a newline and kcm's parser drops it at a line end. `-o` writes to a `mktemp` file (600) in the same folder and hard-links it into place with `ln`, which fails on any existing entry. `noclobber` would still write into an existing FIFO. Locals use the `_kcm_` prefix, as in `use`, so they can't hide an exported variable of the same name.
 
 ### Environment Processing
 

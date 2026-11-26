@@ -835,6 +835,17 @@ printf "BOTH=a'b\"c\n" > "$TEST_DIR/export-both.env"
 output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export-both.env" 2>&1 | cat) && exit_code=0 || exit_code=$?
 assert_contains "$output" "Cannot quote BOTH" "Export fails on a value it can't quote"
 
+# dotenv turns any carriage return into a newline, so the value would not read back
+printf 'CR=a\rb\n' > "$TEST_DIR/export-cr.env"
+output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export-cr.env" 2>&1 | cat)
+assert_contains "$output" "Cannot quote CR" "Export fails on a value with a carriage return"
+
+# Exported names that match kcm's own variable names keep their values
+printf 'name=file\nvalue=file\nk=file\nenv_file=file\ntext=file\ncount=file\n' > "$TEST_DIR/export-names.env"
+output=$(name=caller value=caller k=caller env_file=caller text=caller count=caller \
+    "$SCRIPT_PATH" export -e "$TEST_DIR/export-names.env" 2>/dev/null | tr '\n' ' ')
+assert_equals "name='caller' value='caller' k='caller' env_file='caller' text='caller' count='caller' " "$output" "Export keeps exported values for names kcm uses internally"
+
 # In a terminal the text goes to less; this stand-in records what it was given
 mkdir -p "$TEST_DIR/bin"
 printf '#!/bin/sh\ncat > "%s/paged.txt"\n' "$TEST_DIR" > "$TEST_DIR/bin/less"
