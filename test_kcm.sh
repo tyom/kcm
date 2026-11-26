@@ -532,7 +532,7 @@ output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use --full 2>/dev/null | cat)
 assert_equals "$(printf 'ROOT_ONLY=root\nSHARED=web\nWEB_ONLY=web')" "$output" "--full prints merged values"
 
 # In a terminal the = is dimmed; NO_COLOR and pipes (above) stay plain
-output=$(script -q /dev/null "$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>&1)
+output=$(NO_COLOR='' script -q /dev/null "$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>&1)
 assert_contains "$output" $'LONG_SECRET\033[90m=' "Show values dims the = in a terminal"
 assert_equals "LONG_SECRET=sk-a…9f2c" "$(strip_ansi <<< "$output" | grep -o 'LONG_SECRET=.*')" "Colour leaves the text unchanged"
 output=$(NO_COLOR=1 script -q /dev/null "$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>&1)
