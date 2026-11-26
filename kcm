@@ -734,7 +734,7 @@ use_secrets() {
     case "$_kcm_name" in
       # Bash sets these but they are plain, writable variables
       HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|OPTIND|OPTERR) continue ;;
-      BASH_ENV|BASH_XTRACEFD|BASH_REMATCH|OPTARG|POSIXLY_CORRECT) ;;
+      BASH_ENV|BASH_XTRACEFD|BASH_REMATCH|OPTARG|POSIXLY_CORRECT|PS4) ;;
       *) [ "$_kcm_inherited" = false ] && declare -p "$_kcm_name" >/dev/null 2>&1 || continue ;;
     esac
     error_exit "${_KCM_MERGED_SOURCES[$_kcm_k]}: $_kcm_name is managed by Bash"

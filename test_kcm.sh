@@ -592,6 +592,11 @@ printf 'BASH_ENV=%s/hook.sh\n' "$TEST_DIR" > "$TEST_DIR/bash-env.env"
 output=$(BASH_ENV=/dev/null "$SCRIPT_PATH" use --override -e "$TEST_DIR/bash-env.env" -- bash -c 'echo child' 2>&1) && exit_code=0 || exit_code=$?
 assert_exit_code 1 "$exit_code" "--override rejects BASH_ENV even when the caller exports it"
 assert_not_contains "$output" "HOOK_RAN" "--override does not run the env file's BASH_ENV script"
+# Nor PS4, which a tracing Bash runs as code
+printf "PS4='\$(touch %s/ps4-ran)'\n" "$TEST_DIR" > "$TEST_DIR/ps4.env"
+PS4='+ ' "$SCRIPT_PATH" use --override -e "$TEST_DIR/ps4.env" -- bash -xc true >/dev/null 2>&1 && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "--override rejects PS4 even when the caller exports it"
+assert_equals "no" "$([ -e "$TEST_DIR/ps4-ran" ] && echo yes || echo no)" "--override does not run the env file's PS4 command"
 
 printf 'FIRST=keychain://%s_MISSING\nUID=1000\n' "$TEST_KEY" > "$TEST_DIR/managed.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/managed.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
