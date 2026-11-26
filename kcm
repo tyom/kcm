@@ -723,19 +723,29 @@ use_secrets() {
   for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
     _kcm_name="${_KCM_MERGED_NAMES[$_kcm_k]}"
     # A name from the caller's environment keeps the caller's value, so nothing is assigned.
-    # --override does assign it, so the names below stay rejected.
-    # shortcut: declare -p can't tell other inherited names from Bash's own (an exported IFS, say),
-    # so those pass with --override; list them here if one turns out to matter
-    local _kcm_inherited=false
+    # --override does assign it, so Bash's own names stay rejected.
+    # shortcut: an inherited name Bash treats like any other variable (an exported IFS, say)
+    # passes with --override; list it below if one turns out to matter
+    local _kcm_inherited=false _kcm_attrs
     if [[ "$_KCM_SHELL_NAMES" == *$'\n'"$_kcm_name"$'\n'* ]]; then
       [ "$_kcm_override" = true ] || continue
       _kcm_inherited=true
     fi
     case "$_kcm_name" in
-      # Bash sets these but they are plain, writable variables
-      HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|OPTIND|OPTERR) continue ;;
+      # Bash sets these but they are plain, writable variables. Not OPTIND: it is an integer
+      # variable, and Bash evaluates an assignment to one as arithmetic, which can run commands
+      HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|OPTERR) continue ;;
       BASH_ENV|BASH_XTRACEFD|BASH_REMATCH|OPTARG|POSIXLY_CORRECT|PS4) ;;
-      *) [ "$_kcm_inherited" = false ] && declare -p "$_kcm_name" >/dev/null 2>&1 || continue ;;
+      *)
+        if [ "$_kcm_inherited" = true ]; then
+          # An ordinary variable from the caller has the export attribute alone. Bash's own carry
+          # more, such as integer (RANDOM), where an assignment is evaluated and can run commands
+          _kcm_attrs=$(declare -p "$_kcm_name" 2>/dev/null); _kcm_attrs="${_kcm_attrs#declare -}"
+          [ "${_kcm_attrs%% *}" != x ] || continue
+        else
+          declare -p "$_kcm_name" >/dev/null 2>&1 || continue
+        fi
+        ;;
     esac
     error_exit "${_KCM_MERGED_SOURCES[$_kcm_k]}: $_kcm_name is managed by Bash"
   done

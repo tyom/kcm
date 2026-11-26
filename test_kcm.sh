@@ -598,6 +598,17 @@ PS4='+ ' "$SCRIPT_PATH" use --override -e "$TEST_DIR/ps4.env" -- bash -xc true >
 assert_exit_code 1 "$exit_code" "--override rejects PS4 even when the caller exports it"
 assert_equals "no" "$([ -e "$TEST_DIR/ps4-ran" ] && echo yes || echo no)" "--override does not run the env file's PS4 command"
 
+# Bash evaluates an assignment to an integer variable as arithmetic, which can run a command
+printf "OPTIND='_KCM_MERGED_VALUES[\$(touch %s/optind-ran)0]'\n" "$TEST_DIR" > "$TEST_DIR/optind.env"
+output=$(env -u OPTIND "$SCRIPT_PATH" use -e "$TEST_DIR/optind.env" -- true 2>&1) && exit_code=0 || exit_code=$?
+assert_contains "$output" "OPTIND is managed by Bash" "Rejects OPTIND from an env file"
+assert_equals "no" "$([ -e "$TEST_DIR/optind-ran" ] && echo yes || echo no)" "Does not evaluate an env file's OPTIND"
+# The caller exporting such a variable does not make it an ordinary one for --override
+printf "RANDOM='_KCM_MERGED_VALUES[\$(touch %s/random-ran)0]'\n" "$TEST_DIR" > "$TEST_DIR/random.env"
+output=$(RANDOM=1 "$SCRIPT_PATH" use --override -e "$TEST_DIR/random.env" -- true 2>&1) && exit_code=0 || exit_code=$?
+assert_contains "$output" "RANDOM is managed by Bash" "--override rejects RANDOM even when the caller exports it"
+assert_equals "no" "$([ -e "$TEST_DIR/random-ran" ] && echo yes || echo no)" "--override does not evaluate an env file's RANDOM"
+
 printf 'FIRST=keychain://%s_MISSING\nUID=1000\n' "$TEST_KEY" > "$TEST_DIR/managed.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/managed.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
 assert_exit_code 1 "$exit_code" "Rejects a Bash-managed name"
