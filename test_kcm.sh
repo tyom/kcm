@@ -835,9 +835,13 @@ printf "BOTH=a'b\"c\n" > "$TEST_DIR/export-both.env"
 output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export-both.env" 2>&1 | cat) && exit_code=0 || exit_code=$?
 assert_contains "$output" "Cannot quote BOTH" "Export fails on a value it can't quote"
 
-output=$(script -q /dev/null "$SCRIPT_PATH" export -e "$TEST_DIR/export.env" 2>&1)
-assert_contains "$output" "Not printing secrets to the terminal" "Export refuses to print to a terminal"
-assert_not_contains "$output" "exported-secret" "Terminal refusal shows no values"
+# In a terminal the text goes to less; this stand-in records what it was given
+mkdir -p "$TEST_DIR/bin"
+printf '#!/bin/sh\ncat > "%s/paged.txt"\n' "$TEST_DIR" > "$TEST_DIR/bin/less"
+chmod +x "$TEST_DIR/bin/less"
+output=$(PATH="$TEST_DIR/bin:$PATH" script -q /dev/null "$SCRIPT_PATH" export -e "$TEST_DIR/export.env" 2>&1)
+assert_not_contains "$output" "exported-secret" "Export in a terminal prints no values directly"
+assert_equals "$(cat "$TEST_DIR/exported.env")" "$(cat "$TEST_DIR/paged.txt" 2>/dev/null)" "Export in a terminal opens the quoted text in less"
 
 echo "value1" | "$SCRIPT_PATH" add "${TEST_KEY}_TEST_PATTERN_ONE" - >/dev/null 2>&1
 echo "value2" | "$SCRIPT_PATH" add "${TEST_KEY}_TEST_PATTERN_TWO" - >/dev/null 2>&1

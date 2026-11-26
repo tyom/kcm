@@ -129,7 +129,8 @@ COMMANDS:
   export [-e FILE] [-o FILE | -c]
     Resolve env files like 'use' and write plain NAME='value' lines, for example
     to share them with someone. Fails if a keychain:// entry is missing.
-    Without -o or -c, prints only when piped, never to a terminal.
+    Without -o or -c, opens in less in a terminal (kept out of scrollback)
+    and prints plain text when piped.
 
     Options:
       -e, --env-file FILE   - Use only this env file (skips discovery)
@@ -691,9 +692,6 @@ export_secrets() {
   if [ -n "$out" ] && [ "$to_clipboard" = true ]; then
     error_exit "Use either -o or -c, not both"
   fi
-  if [ -z "$out" ] && [ "$to_clipboard" = false ] && [ -t 1 ]; then
-    error_exit "Not printing secrets to the terminal. Use -o FILE or -c, or pipe the output"
-  fi
   if [ -n "$out" ] && { [ -e "$out" ] || [ -L "$out" ]; }; then
     error_exit "'$out' already exists"
   fi
@@ -719,6 +717,9 @@ export_secrets() {
     if [ "$ignored" -eq 1 ]; then
       info "Warning: git doesn't ignore $out, so it could be committed"
     fi
+  elif [ -t 1 ]; then
+    # Same pager as use --full, so the values stay out of terminal scrollback
+    printf '%s' "$text" | less -R -+F -+X || true
   else
     printf '%s' "$text"
   fi

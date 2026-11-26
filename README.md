@@ -107,6 +107,7 @@ Turn your env files back into plain values, for example to give them to someone 
 ```bash
 kcm export -c                 # copy to clipboard, cleared after 45 seconds
 kcm export -o shared.env      # write a new file
+kcm export                    # view it in less
 kcm export -e .env.local | …  # or pipe it
 ```
 
@@ -114,7 +115,7 @@ kcm export -e .env.local | …  # or pipe it
 
 - If a `keychain://` entry is missing, export fails and writes nothing.
 - `-o` creates the file readable only by you and never overwrites one. If git doesn't ignore the file, kcm warns.
-- Without `-o` or `-c`, kcm prints only when the output is piped, so secrets don't land in your terminal scrollback.
+- Without `-o` or `-c`, the output opens in `less` in a terminal, like `kcm use --full`, so secrets don't stay in your scrollback. When piped, kcm prints it as is.
 
 The file holds your secrets in plain text. Pasting from the clipboard into a password manager or a secure note is safer than sending a file around.
 
