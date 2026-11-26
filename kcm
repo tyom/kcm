@@ -653,7 +653,8 @@ warn_shell_overrides() {
     # printenv adds one newline; the x keeps any newlines of the value itself
     _kcm_shell=$(printenv "$_kcm_name"; echo x); _kcm_shell="${_kcm_shell%$'\nx'}"
     _kcm_value="${_KCM_MERGED_VALUES[$_kcm_k]}"
-    [ "$_kcm_shell" = "$_kcm_value" ] && continue
+    # An equal reference is still unresolved, so only a plain value can match
+    [[ "$_kcm_value" != keychain://* && "$_kcm_shell" == "$_kcm_value" ]] && continue
     [[ "$_kcm_value" == keychain://* && "${_KCM_RESOLVED:-}" == *$'\n'"$_kcm_name=$_kcm_value $(printf '%s' "$_kcm_shell" | cksum)"$'\n'* ]] && continue
     _kcm_list+="$_kcm_name, "
   done
@@ -721,13 +722,20 @@ use_secrets() {
   local _kcm_k _kcm_name
   for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
     _kcm_name="${_KCM_MERGED_NAMES[$_kcm_k]}"
-    # Not is_exported: with --override a name from the caller's environment is still not Bash's
-    [[ "$_KCM_SHELL_NAMES" == *$'\n'"$_kcm_name"$'\n'* ]] && continue
+    # A name from the caller's environment keeps the caller's value, so nothing is assigned.
+    # --override does assign it, so the names below stay rejected.
+    # shortcut: declare -p can't tell other inherited names from Bash's own (an exported IFS, say),
+    # so those pass with --override; list them here if one turns out to matter
+    local _kcm_inherited=false
+    if [[ "$_KCM_SHELL_NAMES" == *$'\n'"$_kcm_name"$'\n'* ]]; then
+      [ "$_kcm_override" = true ] || continue
+      _kcm_inherited=true
+    fi
     case "$_kcm_name" in
       # Bash sets these but they are plain, writable variables
       HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|OPTIND|OPTERR) continue ;;
       BASH_ENV|BASH_XTRACEFD|BASH_REMATCH|OPTARG|POSIXLY_CORRECT) ;;
-      *) declare -p "$_kcm_name" >/dev/null 2>&1 || continue ;;
+      *) [ "$_kcm_inherited" = false ] && declare -p "$_kcm_name" >/dev/null 2>&1 || continue ;;
     esac
     error_exit "${_KCM_MERGED_SOURCES[$_kcm_k]}: $_kcm_name is managed by Bash"
   done

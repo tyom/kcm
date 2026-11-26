@@ -582,6 +582,16 @@ assert_contains "$output" "is not used: REF (" "Nested use warns when the value 
 printf 'REF=keychain://%s\n' "$TEST_KEY" > "$TEST_DIR/override-other.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/override.env" -- "$SCRIPT_PATH" use -e "$TEST_DIR/override-other.env" -- true 2>&1)
 assert_contains "$output" "is not used: REF (" "Nested use warns when its file points at another entry"
+# The shell holding the same reference unresolved still hides the Keychain value
+output=$(REF="keychain://${TEST_KEY}_QUOTE" "$SCRIPT_PATH" use -e "$TEST_DIR/override.env" -- true 2>&1)
+assert_contains "$output" "is not used: REF (" "Names a reference the shell holds unresolved"
+
+# --override does not let an env file replace a variable that changes how Bash starts
+printf 'echo HOOK_RAN\n' > "$TEST_DIR/hook.sh"
+printf 'BASH_ENV=%s/hook.sh\n' "$TEST_DIR" > "$TEST_DIR/bash-env.env"
+output=$(BASH_ENV=/dev/null "$SCRIPT_PATH" use --override -e "$TEST_DIR/bash-env.env" -- bash -c 'echo child' 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "--override rejects BASH_ENV even when the caller exports it"
+assert_not_contains "$output" "HOOK_RAN" "--override does not run the env file's BASH_ENV script"
 
 printf 'FIRST=keychain://%s_MISSING\nUID=1000\n' "$TEST_KEY" > "$TEST_DIR/managed.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/managed.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
