@@ -99,6 +99,10 @@ Replaces the script process with the target command, ensuring:
 
 `import` parses env files directly (the parser never resolves references), so `keychain://` values stay as text, and uses the line range the parser records for each assignment. It stores every picked value with `store_secret` (which reads it back) before touching any file, then rewrites each file once through a temp file in the same folder and `mv`. A failed store leaves its line as it was. A file whose checksum changed since the scan is skipped, since its line ranges no longer hold. It is checked after the prompts and again just before `mv`. This narrows the window but is not atomic: an edit between the last check and `mv` is overwritten. A failed store or rewrite, a file that changed after the scan, or a readable Keychain entry that no longer holds the expected value makes `import` exit 1. Values you chose to skip do not. An entry kcm cannot read, kept at the prompt, is only checked for existence, so a change to its value goes unnoticed. A value the Keychain already holds is only referenced, so that entry keeps its old attributes. There is no backup file, because it would keep the plain values on disk.
 
+### Export
+
+`export` loads and resolves env files the same way as `use` (`load_env_files`, then `resolve_env_values strict`, which fails on a missing entry instead of keeping the reference). It builds the whole text before writing, so a failure writes nothing. Values go in single quotes because kcm's parser and dotenv both read them literally. dotenv expands `\n` and `\r` inside double quotes, so double quotes are only used for a value with `'` and neither of those. `-o` writes under `umask 077` with `noclobber`, so the file is 600 and an existing file is never replaced.
+
 ### Environment Processing
 
 Uses parallel arrays (`PROCESSED_ENV_NAMES`, `PROCESSED_ENV_VALUES`) to parse everything before exporting anything.

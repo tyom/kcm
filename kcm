@@ -126,6 +126,21 @@ COMMANDS:
       kcm import
       kcm import -e .env.local
 
+  export [-e FILE] [-o FILE | -c]
+    Resolve env files like 'use' and write plain NAME='value' lines, for example
+    to share them with someone. Fails if a keychain:// entry is missing.
+    Without -o or -c, prints only when piped, never to a terminal.
+
+    Options:
+      -e, --env-file FILE   - Use only this env file (skips discovery)
+      -o, --output FILE     - Write to a new file, readable only by you
+      -c, --copy            - Copy to clipboard (auto-clears after 45 seconds)
+
+    Examples:
+      kcm export -c
+      kcm export -o shared.env
+      kcm export -e .env.local | pbcopy
+
   install-wrapper [PATH]
     Add a script to the current git repo that runs a command through 'kcm use'
     when kcm is installed, and runs it directly otherwise. Use it in committed
@@ -459,8 +474,9 @@ merge_env_files() {
   done
 }
 
+# Replace keychain:// references with their values. strict: fail on a missing entry.
 resolve_env_values() {
-  local k value
+  local k value strict="${1:-}"
   for k in "${!_KCM_MERGED_NAMES[@]}"; do
     value="${_KCM_MERGED_VALUES[$k]}"
     [[ "$value" == keychain://* ]] && ! is_exported "${_KCM_MERGED_NAMES[$k]}" || continue
@@ -469,6 +485,8 @@ resolve_env_values() {
       _KCM_MERGED_VALUES[k]="${value%x}"
     elif [ "$?" -eq 2 ]; then
       error_exit "Cannot resolve ${_KCM_MERGED_VALUES[$k]} for ${_KCM_MERGED_NAMES[$k]}"
+    elif [ "$strict" = strict ]; then
+      error_exit "${_KCM_MERGED_VALUES[$k]} for ${_KCM_MERGED_NAMES[$k]} not found in Keychain"
     else
       info "Warning: ${_KCM_MERGED_VALUES[$k]} not found in Keychain, keeping it as is"
     fi
@@ -516,6 +534,22 @@ print_merged_env() {
     _kcm_value="${_kcm_value//$'\n'/$_kcm_off$'\n'$_kcm_tint}"
     printf '%s%s=%s%s%s%s\n' "$_kcm_name" "$_kcm_dim" "$_kcm_off" "$_kcm_tint" "$_kcm_value" "$_kcm_off"
   done
+}
+
+# Load FILE, or discover env files when it is empty, and merge them (see merge_env_files)
+load_env_files() {
+  _KCM_ENV_FILES=()
+  if [ -z "$1" ]; then
+    discover_env_files
+  elif [ -f "$1" ]; then
+    _KCM_ENV_FILES=("$1")
+  else
+    info "Warning: env file '$1' not found, proceeding without it"
+  fi
+
+  # Like dotenv, variables already in the environment are not overridden
+  _KCM_EXPORTED_NAMES=$'\n'"$(compgen -e)"$'\n'
+  merge_env_files
 }
 
 # Function to use secrets from env file
@@ -567,20 +601,7 @@ use_secrets() {
     shift
   done
 
-  _KCM_ENV_FILES=()
-  if [ -z "$_kcm_env_file" ]; then
-    discover_env_files
-  else
-    if [ -f "$_kcm_env_file" ]; then
-      _KCM_ENV_FILES=("$_kcm_env_file")
-    else
-      info "Warning: env file '$_kcm_env_file' not found, proceeding without it"
-    fi
-  fi
-
-  # Like dotenv, variables already in the environment are not overridden
-  _KCM_EXPORTED_NAMES=$'\n'"$(compgen -e)"$'\n'
-  merge_env_files
+  load_env_files "$_kcm_env_file"
 
   # The only locals in scope here use the _kcm_ prefix. Other unexported
   # variables already declared by the shell belong to Bash.
@@ -621,6 +642,86 @@ use_secrets() {
 
   # Execute the command with the processed environment
   exec "${_kcm_args[@]}"
+}
+
+# Print each merged variable as NAME='value', in quotes both kcm and dotenv read literally.
+# dotenv expands \n and \r inside "...", so "..." is only used for values with ' and neither of those.
+format_env_file() {
+  local k name value
+  for k in "${!_KCM_MERGED_NAMES[@]}"; do
+    name="${_KCM_MERGED_NAMES[$k]}"
+    value="${_KCM_MERGED_VALUES[$k]}"
+    # printenv adds one newline; the x keeps any newlines of the value itself
+    if is_exported "$name"; then value=$(printenv "$name"; echo x); value="${value%$'\nx'}"; fi
+    if [[ "$value" != *"'"* ]]; then
+      printf "%s='%s'\n" "$name" "$value"
+    elif [[ "$value" != *'"'* && "$value" != *'\n'* && "$value" != *'\r'* ]]; then
+      printf '%s="%s"\n' "$name" "$value"
+    else
+      error_exit "Cannot quote $name for an env file: its value has ' and also \" or a literal \\\\n or \\\\r"
+    fi
+  done
+}
+
+# Resolve env files and write them as plain values to a file, the clipboard or a pipe
+export_secrets() {
+  local env_file="" out="" to_clipboard=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -e|--env-file)
+        [ -n "${2:-}" ] || error_exit "-e/--env-file requires an argument"
+        env_file="$2"
+        shift 2
+        ;;
+      -o|--output)
+        [ -n "${2:-}" ] || error_exit "-o/--output requires an argument"
+        out="$2"
+        shift 2
+        ;;
+      -c|--copy)
+        to_clipboard=true
+        shift
+        ;;
+      *)
+        error_exit "Unknown option '$1'. Usage: $_KCM_SCRIPT_NAME export [-e FILE] [-o FILE | -c]"
+        ;;
+    esac
+  done
+  # Checked before any Keychain prompt
+  if [ -n "$out" ] && [ "$to_clipboard" = true ]; then
+    error_exit "Use either -o or -c, not both"
+  fi
+  if [ -z "$out" ] && [ "$to_clipboard" = false ] && [ -t 1 ]; then
+    error_exit "Not printing secrets to the terminal. Use -o FILE or -c, or pipe the output"
+  fi
+  if [ -n "$out" ] && { [ -e "$out" ] || [ -L "$out" ]; }; then
+    error_exit "'$out' already exists"
+  fi
+
+  load_env_files "$env_file"
+  resolve_env_values strict
+  local text count=${#_KCM_MERGED_NAMES[@]}
+  # The x keeps the final newline; the subshell's error_exit stops kcm too
+  text=$(format_env_file && printf x) || exit 1
+  text="${text%x}"
+
+  if [ "$to_clipboard" = true ]; then
+    copy_to_clipboard "$text"
+    success "Copied $count variables to clipboard"
+    info "Clipboard will be cleared in 45 seconds for security"
+  elif [ -n "$out" ]; then
+    # umask 077 makes the file 600; noclobber fails if it appeared since the check above
+    ( umask 077; set -C; printf '%s' "$text" > "$out" ) || error_exit "Cannot write '$out'"
+    success "Exported $count variables to $out"
+    local ignored=0
+    git -C "$(dirname "$out")" check-ignore -q -- "$(basename "$out")" 2>/dev/null || ignored=$?
+    # 1: inside a repo and not ignored (128: not a repo)
+    if [ "$ignored" -eq 1 ]; then
+      info "Warning: git doesn't ignore $out, so it could be committed"
+    fi
+  else
+    printf '%s' "$text"
+  fi
 }
 
 # Write a script that runs a command through kcm use when kcm is installed,
@@ -1238,14 +1339,25 @@ show_secret() {
   fi
 }
 
+# Put VALUE on the clipboard and clear it after 45 seconds,
+# unless the user has copied something else since
+copy_to_clipboard() {
+  if ! command -v pbcopy >/dev/null 2>&1; then
+    error_exit "This command requires macOS with the 'pbcopy' command"
+  fi
+  local value="$1"
+  printf '%s' "$value" | pbcopy
+  # Closed file descriptors keep the terminal from waiting on it
+  (
+    sleep 45
+    if pasted=$(pbpaste && printf x) && [ "$pasted" = "${value}x" ]; then pbcopy </dev/null; fi
+  ) </dev/null >/dev/null 2>&1 &
+}
+
 # Function to copy secret to clipboard
 copy_secret() {
   if ! command -v security >/dev/null 2>&1; then
     error_exit "This command requires macOS with the 'security' command"
-  fi
-
-  if ! command -v pbcopy >/dev/null 2>&1; then
-    error_exit "This command requires macOS with the 'pbcopy' command"
   fi
 
   if [ $# -lt 1 ]; then
@@ -1257,17 +1369,9 @@ copy_secret() {
 
   # Get the secret value
   if value=$(read_secret "$KEY_NAME" && printf x) && [ "$value" != x ]; then
-    value="${value%x}"
-    printf '%s' "$value" | pbcopy
+    copy_to_clipboard "${value%x}"
     success "Secret '$KEY_NAME' copied to clipboard"
     info "Clipboard will be cleared in 45 seconds for security"
-
-    # Clear after 45 seconds, unless the user has copied something else since.
-    # Closed file descriptors keep the terminal from waiting on it.
-    (
-      sleep 45
-      if pasted=$(pbpaste && printf x) && [ "$pasted" = "${value}x" ]; then pbcopy </dev/null; fi
-    ) </dev/null >/dev/null 2>&1 &
   else
     [ "$?" -eq 2 ] && exit 1
     error_exit "Secret '$KEY_NAME' not found or unreadable in Keychain"
@@ -1486,6 +1590,10 @@ case "${1:-}" in
     shift
     import_secrets "$@"
     ;;
+  export)
+    shift
+    export_secrets "$@"
+    ;;
   version|--version|-v)
     echo "kcm version $_KCM_VERSION"
     ;;
@@ -1499,7 +1607,7 @@ case "${1:-}" in
   *)
     echo -e "${_KCM_RED}Error: Unknown command '$1'${_KCM_NC}" >&2
     echo "" >&2
-    echo "Available commands: add, remove, show, copy, ls, use, import, install-wrapper, version, help" >&2
+    echo "Available commands: add, remove, show, copy, ls, use, import, export, install-wrapper, version, help" >&2
     echo "Try '$_KCM_SCRIPT_NAME help' for more information." >&2
     exit 1
     ;;
