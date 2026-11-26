@@ -60,6 +60,7 @@ COMMANDS:
       echo "secret" | kcm add TOKEN -
       cat ~/secret.txt | kcm add AWS_KEY -
       kcm add STRIPE_KEY -c "Test mode key, from the Stripe dashboard"
+      kcm show API_KEY | kcm add API_KEY - -c "What it is for"  # Hint for an existing secret
 
   remove KEY_NAME
     Remove a secret from Keychain

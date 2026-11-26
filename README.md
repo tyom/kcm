@@ -67,6 +67,12 @@ kcm add STRIPE_KEY -c "Test mode key, from the Stripe dashboard"
 
 `kcm ls` shows the hint next to the name, and Keychain Access shows it as the comment. Adding the name again without `-c` updates the value and keeps the hint. A hint can be up to 200 characters. It is not encrypted, so don't put anything secret in it.
 
+To add a hint to a secret you already have, pipe its value back in:
+
+```bash
+kcm show STRIPE_KEY | kcm add STRIPE_KEY - -c "Test mode key, from the Stripe dashboard"
+```
+
 Multiline secrets such as PEM keys work through stdin. Adding a name that already exists updates its value. If the name matches several Keychain entries ambiguously, `add` refuses to change any of them.
 
 After adding, you'll get a `.env` entry like:
