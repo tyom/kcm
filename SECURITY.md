@@ -73,7 +73,7 @@ We take security seriously. If you discover a vulnerability, please report it re
 
 ### Other Limitations
 
-**Process Arguments**: Secret values briefly appear in process arguments when added to keychain (milliseconds, local access required).
+**Process Arguments**: kcm passes a value to `security` on stdin. A value over about 2 KB does not fit on one stdin line, so it goes through the argument list and is visible in `ps` for a few milliseconds to local users.
 
 **Memory Storage**: Secrets in environment variables remain in process memory and could be swapped to disk. Use FileVault.
 
