@@ -276,8 +276,9 @@ read_secret() {
   esac
 }
 
-# Choose the same tagged or legacy entry as ls. A single untagged account from
-# older installations can also be addressed by name. Status 44 means absent.
+# Choose the same tagged or legacy entry as ls. An untagged entry under another account
+# is used only when it is the sole entry with that name: another app's entry beside it
+# could belong to the same app, so kcm refuses rather than guess. Status 44 means absent.
 select_keychain_item() {
   local name="$1" matches rank account keychain best=0 count=0 total=0
   [ -n "$name" ] || return 44

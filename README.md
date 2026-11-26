@@ -206,7 +206,7 @@ kcm ls "*_KEY"
 kcm remove OLD_API_KEY
 ```
 
-When several Keychain entries share a service name, kcm prefers its tagged entry, then a legacy entry for your user account. A single untagged entry under another account can also be used by name. If the best match is ambiguous, give the entries distinct service names in Keychain Access before retrying.
+When several Keychain entries share a service name, kcm prefers its tagged entry, then a legacy entry for your user account. An untagged entry under another account is used only when no other entry has that name. If the best match is ambiguous, give the entries distinct service names in Keychain Access before retrying.
 
 ## Environment File Format
 
