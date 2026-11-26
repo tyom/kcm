@@ -37,7 +37,7 @@ cleanup() {
         while security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1; do :; done
     done
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
-    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT; do
+    for suffix in API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT HINT ACCENT; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -130,7 +130,7 @@ assert_contains "$output" "USAGE:" "Help shows usage"
 output=$("$SCRIPT_PATH" help 2>&1)
 assert_not_contains "$output" $'\033' "Piped help has no colour codes"
 output=$(NO_COLOR='' script -q /dev/null "$SCRIPT_PATH" help </dev/null 2>&1)
-assert_contains "$output" $'\033[1;97;100m add ' "Help in a terminal shows commands as chips"
+assert_contains "$output" $'\033[1;38;5;234;48;5;250m add ' "Help in a terminal shows commands as chips"
 
 # Test 2: Version command
 output=$("$SCRIPT_PATH" version 2>&1) && exit_code=$? || exit_code=$?
@@ -151,10 +151,91 @@ assert_contains "$attrs" '"desc"<blob>="kcm secret"' "Added secret has kind 'kcm
 assert_contains "$attrs" '"crtr"<uint32>="kcm "' "Added secret has creator code 'kcm '"
 assert_contains "$attrs" '"icmt"<blob>="Added by kcm"' "Added secret has a comment"
 
+# -c stores a hint as the comment, before or after the -
+echo "hinted" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Stripe test key from the dashboard" >/dev/null 2>&1
+attrs=$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)
+assert_contains "$attrs" '"icmt"<blob>="Stripe test key from the dashboard"' "add -c stores the hint as the comment"
+
+# A new value without -c keeps the hint
+echo "hinted2" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - >/dev/null 2>&1
+attrs=$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)
+assert_contains "$attrs" '"icmt"<blob>="Stripe test key from the dashboard"' "Re-adding without -c keeps the hint"
+assert_equals "hinted2" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "Re-adding without -c still updates the value"
+
+# A long hint would push the value off stdin and onto the argument list
+long_hint=$(head -c 201 /dev/zero | tr '\0' 'h')
+output=$(echo "hinted3" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "$long_hint" 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "add -c refuses a hint over 200 characters"
+assert_equals "hinted2" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A refused hint leaves the value alone"
+
+# security -i cuts a line at 4095 bytes, not characters: 200 emoji are 800 bytes
+emoji_hint=$(printf '🙂%.0s' $(seq 200))
+big_value=$(head -c 1700 /dev/zero | tr '\0' 'v')
+echo "$big_value" | LC_ALL=en_US.UTF-8 "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "$emoji_hint" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 0 "$exit_code" "add stores a value whose command is under 4096 characters but over 4095 bytes"
+assert_equals "$big_value" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A long non-ASCII hint does not cut the value short"
+echo "hinted2" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Stripe test key from the dashboard" >/dev/null 2>&1
+
+# ls shows hints next to names, but not kcm's own comments
+output=$("$SCRIPT_PATH" ls "${TEST_KEY}*" 2>&1 | strip_ansi | tr -s ' ')
+assert_contains "$output" "${TEST_KEY}_HINT Stripe test key from the dashboard" "ls shows the hint"
+assert_not_contains "$output" "Added by kcm" "ls hides kcm's own comment"
+echo "hinted4" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "clé d'été" >/dev/null 2>&1
+assert_contains "$("$SCRIPT_PATH" ls "${TEST_KEY}_HINT" 2>&1 | strip_ansi | tr -s ' ')" "${TEST_KEY}_HINT clé d'été" "ls shows a hint with accented letters"
+
 # Test 4: Show secret
 output=$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "Show secret exits successfully"
 assert_equals "test123" "$output" "Show returns correct secret value"
+
+# If the old hint can't be read, a new value must not replace it with kcm's default comment
+mkdir -p "$TEST_DIR/failcomment"
+cat > "$TEST_DIR/failcomment/security" << 'EOF'
+#!/bin/bash
+# Fail the attribute lookup for one account: no -g and no -i, so reads and writes still work
+if [ "${1:-}" = find-generic-password ] && [[ " $* " == *" -a "* && " $* " != *" -g "* ]]; then exit 1; fi
+exec /usr/bin/security "$@"
+EOF
+chmod +x "$TEST_DIR/failcomment/security"
+echo "hinted4" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Keep me" >/dev/null 2>&1
+echo "hinted5" | PATH="$TEST_DIR/failcomment:$PATH" "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "add fails when the old hint can't be read"
+assert_contains "$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)" '"icmt"<blob>="Keep me"' "A failed hint lookup leaves the hint alone"
+assert_equals "hinted4" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A failed hint lookup leaves the value alone"
+
+# A comment with newlines, as Keychain Access can write, survives a new value byte for byte
+security add-generic-password -U -s "${TEST_KEY}_HINT" -a "$USER" -j $'Dashboard\nRotate monthly\n' -w multiline >/dev/null 2>&1
+echo "hinted7" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - >/dev/null 2>&1
+assert_contains "$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)" '"icmt"<blob>=0x44617368626F6172640A526F74617465206D6F6E74686C790A ' "Re-adding without -c leaves a multi-line comment unchanged"
+assert_equals "hinted7" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "Re-adding next to a multi-line comment updates the value"
+
+# security -i exits 0 when its command fails; the same value with a new hint must not pass as stored
+mkdir -p "$TEST_DIR/nowrite"
+cat > "$TEST_DIR/nowrite/security" << 'EOF'
+#!/bin/bash
+# Drop every write: -i reads the command and does nothing, add-generic-password does nothing
+if [ "${1:-}" = -i ]; then cat >/dev/null; exit 0; fi
+[ "${1:-}" = add-generic-password ] && exit 0
+exec /usr/bin/security "$@"
+EOF
+chmod +x "$TEST_DIR/nowrite/security"
+echo "hinted7" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Old hint" >/dev/null 2>&1
+echo "hinted7" | PATH="$TEST_DIR/nowrite:$PATH" "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "New hint" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "add fails when the hint was not stored, even if the value matches"
+
+# kcm tells its own comments from a hint by their wording, so a hint may not use it
+echo "hinted8" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Kept hint" >/dev/null 2>&1
+# A newline is stored as a space, so the check must see the hint as it will be stored
+for reserved in "Imported by kcm from a legacy vault" "Added by kcm" $'Imported by\nkcm from a legacy vault' $'Added by\nkcm'; do
+    echo "hinted9" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "$reserved" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+    assert_exit_code 1 "$exit_code" "add -c refuses the hint '${reserved//$'\n'/<newline>}'"
+done
+assert_equals "hinted8" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A refused reserved hint leaves the value alone"
+assert_contains "$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)" '"icmt"<blob>="Kept hint"' "A refused reserved hint leaves the old hint alone"
+
+# A hint can hold escape codes, written by kcm or another tool; ls must not send them to the terminal
+echo "hinted5" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c $'bad\033[2Jhint' >/dev/null 2>&1
+assert_not_contains "$("$SCRIPT_PATH" ls "${TEST_KEY}_HINT" 2>&1 | grep "${TEST_KEY}_HINT  ")" $'\033[2J' "ls strips control characters from a hint"
 
 # Test 5: List secrets
 output=$("$SCRIPT_PATH" ls 2>&1) && exit_code=$? || exit_code=$?
@@ -618,6 +699,14 @@ assert_equals "$(printf '# config\n%s="keychain://%s"\nPORT=3000' "${TEST_KEY}_A
 attrs=$(security find-generic-password -s "${TEST_KEY}_API_KEY" 2>&1)
 assert_contains "$attrs" "\"icmt\"<blob>=\"Imported by kcm from $(cd "$IMP" && pwd -P)/.env\"" "Imported secret's comment names its source file"
 assert_contains "$attrs" '"desc"<blob>="kcm secret"' "Imported secret has kind 'kcm secret'"
+
+# security prints a comment with non-ASCII text as hex; ls must still hide kcm's own
+ACC="$TEST_DIR/café"
+mkdir -p "$ACC"
+echo "${TEST_KEY}_ACCENT=sk-test-789" > "$ACC/.env"
+(cd "$ACC" && printf '\ny\n' | "$SCRIPT_PATH" import >/dev/null 2>&1)
+assert_equals "sk-test-789" "$("$SCRIPT_PATH" show "${TEST_KEY}_ACCENT" 2>&1)" "Import works from a folder with an accented name"
+assert_not_contains "$("$SCRIPT_PATH" ls "${TEST_KEY}_ACCENT" 2>&1)" "Imported by kcm" "ls hides kcm's import comment when the path has accented letters"
 
 # A newline in the source path must not start a second security -i command
 INJ="$TEST_DIR/inj"$'\n'"add-generic-password -s ${TEST_KEY}_INJECTED -a x -w y"$'\n'"z"
