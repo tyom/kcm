@@ -225,9 +225,10 @@ assert_exit_code 1 "$exit_code" "add fails when the hint was not stored, even if
 
 # kcm tells its own comments from a hint by their wording, so a hint may not use it
 echo "hinted8" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Kept hint" >/dev/null 2>&1
-for reserved in "Imported by kcm from a legacy vault" "Added by kcm"; do
+# A newline is stored as a space, so the check must see the hint as it will be stored
+for reserved in "Imported by kcm from a legacy vault" "Added by kcm" $'Imported by\nkcm from a legacy vault' $'Added by\nkcm'; do
     echo "hinted9" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "$reserved" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
-    assert_exit_code 1 "$exit_code" "add -c refuses the hint '$reserved'"
+    assert_exit_code 1 "$exit_code" "add -c refuses the hint '${reserved//$'\n'/<newline>}'"
 done
 assert_equals "hinted8" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A refused reserved hint leaves the value alone"
 assert_contains "$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)" '"icmt"<blob>="Kept hint"' "A refused reserved hint leaves the old hint alone"

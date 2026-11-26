@@ -208,6 +208,8 @@ add_secret() {
     exit 1
   fi
 
+  # A newline is stored as a space, so check the hint as it will be stored
+  hint="${hint//$'\n'/ }"
   # security -i takes about 4 KB per line: a long comment would push the value onto the argument list
   if [ ${#hint} -gt 200 ]; then
     error_exit "Comment is ${#hint} characters, the limit is 200"
