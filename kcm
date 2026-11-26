@@ -671,13 +671,13 @@ use_secrets() {
         break
         ;;
       *)
-        _kcm_args+=("$1")
-        shift
+        # The command starts here: later flags are its own, not kcm's
+        break
         ;;
     esac
   done
 
-  # Add remaining arguments after --
+  # The command and its arguments
   while [ $# -gt 0 ]; do
     _kcm_args+=("$1")
     shift

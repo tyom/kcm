@@ -500,6 +500,10 @@ assert_contains "$output" "$TEST_DIR/broken.env:2" "Unclosed quote reports its o
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo $1 $2' -- "arg1" "arg2" 2>&1) && exit_code=$? || exit_code=$?
 assert_equals "arg1 arg2" "$output" "Arguments passed correctly"
 
+# Without --, kcm's options end at the command: its flags are not kcm's
+output=$("$SCRIPT_PATH" use -e "$TEST_ENV" printf '[%s]' -s x -e y 2>/dev/null) && exit_code=$? || exit_code=$?
+assert_equals "[-s][x][-e][y]" "$output" "Flags after the command go to the command"
+
 # A comment after a closing quote must not start a multiline value
 printf 'A="x" # note\nB=after\n' > "$TEST_ENV"
 output=$("$SCRIPT_PATH" use --env-file "$TEST_ENV" -- bash -c 'echo "$A|$B"' 2>/dev/null)
