@@ -212,6 +212,10 @@ add_secret() {
   if [ ${#hint} -gt 200 ]; then
     error_exit "Comment is ${#hint} characters, the limit is 200"
   fi
+  # ls and the next add tell kcm's own comments from a hint by this wording
+  if [[ "$hint" == "Added by kcm" || "$hint" == "Imported by kcm"* ]]; then
+    error_exit "A comment can't be 'Added by kcm' or start with 'Imported by kcm': kcm uses that wording for its own comments"
+  fi
 
   # Validate key name (alphanumeric and underscore only)
   if ! [[ "$KEY_NAME" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]]; then

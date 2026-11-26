@@ -223,10 +223,14 @@ echo "hinted7" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Old hint" >/dev/nul
 echo "hinted7" | PATH="$TEST_DIR/nowrite:$PATH" "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "New hint" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
 assert_exit_code 1 "$exit_code" "add fails when the hint was not stored, even if the value matches"
 
-# Only kcm's own import comment is shortened for a long value, never a hint that reads like one
-long_value=$(head -c 2100 /dev/zero | tr '\0' 'v')
-echo "$long_value" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Imported by kcm from a legacy vault" >/dev/null 2>&1
-assert_contains "$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)" '"icmt"<blob>="Imported by kcm from a legacy vault"' "A long value keeps a hint that starts like an import comment"
+# kcm tells its own comments from a hint by their wording, so a hint may not use it
+echo "hinted8" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Kept hint" >/dev/null 2>&1
+for reserved in "Imported by kcm from a legacy vault" "Added by kcm"; do
+    echo "hinted9" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "$reserved" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+    assert_exit_code 1 "$exit_code" "add -c refuses the hint '$reserved'"
+done
+assert_equals "hinted8" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A refused reserved hint leaves the value alone"
+assert_contains "$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)" '"icmt"<blob>="Kept hint"' "A refused reserved hint leaves the old hint alone"
 
 # A hint can hold escape codes, written by kcm or another tool; ls must not send them to the terminal
 echo "hinted5" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c $'bad\033[2Jhint' >/dev/null 2>&1

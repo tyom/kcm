@@ -65,7 +65,7 @@ Add a hint with `-c` to remember what a secret is for or where it came from:
 kcm add STRIPE_KEY -c "Test mode key, from the Stripe dashboard"
 ```
 
-`kcm ls` shows the hint next to the name, and Keychain Access shows it as the comment. Adding the name again without `-c` updates the value and keeps the hint. A hint can be up to 200 characters. It is not encrypted, so don't put anything secret in it.
+`kcm ls` shows the hint next to the name, and Keychain Access shows it as the comment. Adding the name again without `-c` updates the value and keeps the hint. A hint can be up to 200 characters, and can't use the wording of kcm's own comments (`Added by kcm`, `Imported by kcm ...`). It is not encrypted, so don't put anything secret in it.
 
 To add a hint to a secret you already have, pipe its value back in:
 
