@@ -42,7 +42,7 @@ The `use` command:
 
 1. Parses `.env` files line-by-line (never using `eval`)
 2. Merges the files, then resolves `keychain://` references in the winning values by querying the keychain, except for variables the caller already exported
-3. Exports variables not already in the environment and executes the user command via `exec`
+3. Exports variables not already in the environment (all of them with `--override`), warns about shell values that hide a different file value, and executes the user command via `exec`
 
 ## Security Architecture
 

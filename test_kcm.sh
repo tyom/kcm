@@ -559,6 +559,30 @@ printf 'GONE=keychain://KCM_TEST_MISSING_%s\n' "$$" > "$TEST_ENV"
 output=$(GONE=shell "$SCRIPT_PATH" use --env-file "$TEST_ENV" -- true 2>&1)
 assert_not_contains "$output" "not found" "Skips Keychain lookup for variable set in environment"
 
+# A shell value that hides a different env file value is named before the command runs
+printf 'FOO=file\nSAME=same\nONLY_FILE=1\n' > "$TEST_ENV"
+output=$(FOO=shell SAME=same "$SCRIPT_PATH" use --env-file "$TEST_ENV" -- true 2>&1)
+assert_contains "$output" "Warning: set in your shell, so the env file value is not used: FOO (--override uses the file)" "Names the variable the shell overrides"
+assert_not_contains "$output" "SAME" "No warning when the shell and the file agree"
+
+# --override: the env file wins, references included
+output=$(FOO=shell "$SCRIPT_PATH" use --override --env-file "$TEST_ENV" -- bash -c 'echo "$FOO"' 2>&1)
+assert_equals "file" "$output" "--override uses the env file value and does not warn"
+printf 'REF=keychain://%s_QUOTE\n' "$TEST_KEY" > "$TEST_DIR/override.env"
+output=$(REF=shell "$SCRIPT_PATH" use --override -e "$TEST_DIR/override.env" -- printenv REF 2>/dev/null)
+assert_equals "keychain_secret" "$output" "--override resolves a reference the shell also sets"
+
+# A hidden reference is named too, unless an outer kcm use resolved that same reference
+output=$(REF=shell "$SCRIPT_PATH" use -e "$TEST_DIR/override.env" -- true 2>&1)
+assert_contains "$output" "is not used: REF (" "Names a reference the shell overrides"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/override.env" -- "$SCRIPT_PATH" use -e "$TEST_DIR/override.env" -- printenv REF 2>&1)
+assert_equals "keychain_secret" "$output" "Nested use does not warn about what the outer one loaded"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/override.env" -- env REF=changed "$SCRIPT_PATH" use -e "$TEST_DIR/override.env" -- true 2>&1)
+assert_contains "$output" "is not used: REF (" "Nested use warns when the value changed after the outer one loaded it"
+printf 'REF=keychain://%s\n' "$TEST_KEY" > "$TEST_DIR/override-other.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/override.env" -- "$SCRIPT_PATH" use -e "$TEST_DIR/override-other.env" -- true 2>&1)
+assert_contains "$output" "is not used: REF (" "Nested use warns when its file points at another entry"
+
 printf 'FIRST=keychain://%s_MISSING\nUID=1000\n' "$TEST_KEY" > "$TEST_DIR/managed.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/managed.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
 assert_exit_code 1 "$exit_code" "Rejects a Bash-managed name"
@@ -941,6 +965,15 @@ printf 'name=file\nvalue=file\nk=file\nenv_file=file\ntext=file\ncount=file\n' >
 output=$(name=caller value=caller k=caller env_file=caller text=caller count=caller \
     "$SCRIPT_PATH" export -e "$TEST_DIR/export-names.env" 2>/dev/null | tr '\n' ' ')
 assert_equals "name='caller' value='caller' k='caller' env_file='caller' text='caller' count='caller' " "$output" "Export keeps exported values for names kcm uses internally"
+
+# Export warns when it writes a shell value in place of the file's, and --override writes the file's
+printf 'FOO=file\nREF=keychain://%s_QUOTE\n' "$TEST_KEY" > "$TEST_DIR/export-override.env"
+output=$(FOO=shell REF=shell "$SCRIPT_PATH" export -e "$TEST_DIR/export-override.env" 2>/dev/null | tr '\n' ' ')
+assert_equals "FOO='shell' REF='shell' " "$output" "Export still writes the shell values by default"
+output=$(FOO=shell REF=shell "$SCRIPT_PATH" export -e "$TEST_DIR/export-override.env" 2>&1 >/dev/null)
+assert_contains "$output" "is not used: FOO, REF (--override uses the file)" "Export names the variables the shell overrides"
+output=$(FOO=shell REF=shell "$SCRIPT_PATH" export --override -e "$TEST_DIR/export-override.env" 2>&1 | tr '\n' ' ')
+assert_equals "FOO='file' REF='keychain_secret' " "$output" "Export --override writes the env file values and does not warn"
 
 # kcm's own prefix is reserved, even when the caller exports it
 printf '_kcm_name=file\n' > "$TEST_DIR/export-reserved.env"

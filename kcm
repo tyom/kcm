@@ -99,10 +99,12 @@ COMMANDS:
     from the current folder up to the git root and merges them. The closest folder wins,
     and within a folder the order is .env < .env.<mode> < .env.local < .env.<mode>.local.
     <mode> is \$NODE_ENV (default: development).
-    Variables already set in the environment win over env files.
+    Variables already set in the environment win over env files. With a command,
+    kcm warns when one hides a different env file value; --override uses the file.
 
     Options:
       -e, --env-file FILE   - Use only this env file (skips discovery)
+      --override            - Env files win over variables already set in the environment
       -s, --show-values     - Without a command, show masked values (first and last 4 chars)
       --full                - Without a command, show full values (opens in less so they stay
                               out of terminal scrollback; prints plain text when piped)
@@ -132,7 +134,7 @@ COMMANDS:
       kcm import
       kcm import -e .env.local
 
-  export [-e FILE] [-o FILE | -c]
+  export [-e FILE] [--override] [-o FILE | -c]
     Resolve env files like 'use' and write plain NAME='value' lines, for example
     to share them with someone. Fails if a keychain:// entry is missing.
     Without -o or -c, opens in less in a terminal (kept out of scrollback)
@@ -140,6 +142,7 @@ COMMANDS:
 
     Options:
       -e, --env-file FILE   - Use only this env file (skips discovery)
+      --override            - Env files win over variables already set in the environment
       -o, --output FILE     - Write to a new file, readable only by you
       -c, --copy            - Copy to clipboard (auto-clears after 45 seconds)
 
@@ -408,7 +411,7 @@ find_closing_quote() {
   return 1
 }
 
-# True if NAME was exported to kcm by the caller (set _KCM_EXPORTED_NAMES first)
+# True if NAME was exported to kcm by the caller and wins over env files (see load_env_files)
 is_exported() {
   [[ "$_KCM_EXPORTED_NAMES" == *$'\n'"$1"$'\n'* ]]
 }
@@ -556,6 +559,8 @@ resolve_env_values() {
     [[ "$value" == keychain://* ]] && ! is_exported "${_KCM_MERGED_NAMES[$k]}" || continue
     # The x keeps trailing newlines
     if value=$(read_secret "${value#keychain://}" && printf x) && [ "$value" != x ]; then
+      # Name, reference and checksum: a nested kcm use can tell this value from one the user set
+      _KCM_RESOLVED="${_KCM_RESOLVED:-}"$'\n'"${_KCM_MERGED_NAMES[$k]}=${_KCM_MERGED_VALUES[$k]} $(printf '%s' "${value%x}" | cksum)"$'\n'
       _KCM_MERGED_VALUES[k]="${value%x}"
     elif [ "$?" -eq 2 ]; then
       error_exit "Cannot resolve ${_KCM_MERGED_VALUES[$k]} for ${_KCM_MERGED_NAMES[$k]}"
@@ -610,7 +615,8 @@ print_merged_env() {
   done
 }
 
-# Load FILE, or discover env files when it is empty, and merge them (see merge_env_files)
+# Load FILE, or discover env files when it is empty, and merge them (see merge_env_files).
+# override: true lets the env files win over the environment
 load_env_files() {
   _KCM_ENV_FILES=()
   if [ -z "$1" ]; then
@@ -622,7 +628,9 @@ load_env_files() {
   fi
 
   # Like dotenv, variables already in the environment are not overridden
-  _KCM_EXPORTED_NAMES=$'\n'"$(compgen -e)"$'\n'
+  _KCM_SHELL_NAMES=$'\n'"$(compgen -e)"$'\n'
+  _KCM_EXPORTED_NAMES="$_KCM_SHELL_NAMES"
+  if [ "${2:-false}" = true ]; then _KCM_EXPORTED_NAMES=$'\n'; fi
   merge_env_files
 
   # kcm's locals use these prefixes, so one could hide an exported variable of the same name
@@ -634,10 +642,29 @@ load_env_files() {
   done
 }
 
+# Warn about exported variables that hide a different env file value.
+# A reference can't be compared without a Keychain lookup, so it counts unless an outer
+# kcm use resolved that same reference to the value the shell still has (see resolve_env_values).
+warn_shell_overrides() {
+  local _kcm_k _kcm_name _kcm_value _kcm_shell _kcm_list=""
+  for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
+    _kcm_name="${_KCM_MERGED_NAMES[$_kcm_k]}"
+    is_exported "$_kcm_name" || continue
+    # printenv adds one newline; the x keeps any newlines of the value itself
+    _kcm_shell=$(printenv "$_kcm_name"; echo x); _kcm_shell="${_kcm_shell%$'\nx'}"
+    _kcm_value="${_KCM_MERGED_VALUES[$_kcm_k]}"
+    [ "$_kcm_shell" = "$_kcm_value" ] && continue
+    [[ "$_kcm_value" == keychain://* && "${_KCM_RESOLVED:-}" == *$'\n'"$_kcm_name=$_kcm_value $(printf '%s' "$_kcm_shell" | cksum)"$'\n'* ]] && continue
+    _kcm_list+="$_kcm_name, "
+  done
+  [ -z "$_kcm_list" ] || info "Warning: set in your shell, so the env file value is not used: ${_kcm_list%, } (--override uses the file)"
+}
+
 # Function to use secrets from env file
 use_secrets() {
   local _kcm_env_file=""
   local _kcm_show_values=false
+  local _kcm_override=false
   local _kcm_args=()
 
   # Parse arguments
@@ -652,6 +679,10 @@ use_secrets() {
         ;;
       -u|--allow-unsafe)
         # Kept so existing scripts still work; values are never evaluated, so nothing is blocked
+        shift
+        ;;
+      --override)
+        _kcm_override=true
         shift
         ;;
       -s|--show-values)
@@ -683,14 +714,15 @@ use_secrets() {
     shift
   done
 
-  load_env_files "$_kcm_env_file"
+  load_env_files "$_kcm_env_file" "$_kcm_override"
 
   # The only locals in scope here use the _kcm_ prefix. Other unexported
   # variables already declared by the shell belong to Bash.
   local _kcm_k _kcm_name
   for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
     _kcm_name="${_KCM_MERGED_NAMES[$_kcm_k]}"
-    is_exported "$_kcm_name" && continue
+    # Not is_exported: with --override a name from the caller's environment is still not Bash's
+    [[ "$_KCM_SHELL_NAMES" == *$'\n'"$_kcm_name"$'\n'* ]] && continue
     case "$_kcm_name" in
       # Bash sets these but they are plain, writable variables
       HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|OPTIND|OPTERR) continue ;;
@@ -716,11 +748,13 @@ use_secrets() {
     return 0
   fi
 
+  warn_shell_overrides
   for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
     if is_exported "${_KCM_MERGED_NAMES[$_kcm_k]}"; then continue; fi
     export "${_KCM_MERGED_NAMES[$_kcm_k]}=${_KCM_MERGED_VALUES[$_kcm_k]}"
   done
 
+  export _KCM_RESOLVED="${_KCM_RESOLVED:-}"
   # Execute the command with the processed environment
   exec "${_kcm_args[@]}"
 }
@@ -750,7 +784,7 @@ format_env_file() {
 
 # Resolve env files and write them as plain values to a file, the clipboard or a pipe
 export_secrets() {
-  local _kcm_env_file="" _kcm_out="" _kcm_to_clipboard=false
+  local _kcm_env_file="" _kcm_out="" _kcm_to_clipboard=false _kcm_override=false
   while [ $# -gt 0 ]; do
     case "$1" in
       -e|--env-file)
@@ -767,8 +801,12 @@ export_secrets() {
         _kcm_to_clipboard=true
         shift
         ;;
+      --override)
+        _kcm_override=true
+        shift
+        ;;
       *)
-        error_exit "Unknown option '$1'. Usage: $_KCM_SCRIPT_NAME export [-e FILE] [-o FILE | -c]"
+        error_exit "Unknown option '$1'. Usage: $_KCM_SCRIPT_NAME export [-e FILE] [--override] [-o FILE | -c]"
         ;;
     esac
   done
@@ -787,7 +825,8 @@ export_secrets() {
     error_exit "Other users can write to the folder of '$_kcm_out'. Export to a folder only you can write to"
   fi
 
-  load_env_files "$_kcm_env_file"
+  load_env_files "$_kcm_env_file" "$_kcm_override"
+  warn_shell_overrides
   resolve_env_values strict
   local _kcm_text _kcm_count=${#_KCM_MERGED_NAMES[@]}
   # The x keeps the final newline; the subshell's error_exit stops kcm too
