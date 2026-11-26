@@ -531,6 +531,13 @@ assert_equals "$(printf 'LONG_SECRET=sk-a…9f2c\nSHORT=****')" "$output" "Show 
 output=$(cd "$MONO/apps/web" && "$SCRIPT_PATH" use --full 2>/dev/null | cat)
 assert_equals "$(printf 'ROOT_ONLY=root\nSHARED=web\nWEB_ONLY=web')" "$output" "--full prints merged values"
 
+# In a terminal the = is dimmed; NO_COLOR and pipes (above) stay plain
+output=$(script -q /dev/null "$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>&1)
+assert_contains "$output" $'LONG_SECRET\033[90m=' "Show values dims the = in a terminal"
+assert_equals "LONG_SECRET=sk-a…9f2c" "$(strip_ansi <<< "$output" | grep -o 'LONG_SECRET=.*')" "Colour leaves the text unchanged"
+output=$(NO_COLOR=1 script -q /dev/null "$SCRIPT_PATH" use -e "$TEST_DIR/mask.env" --show-values 2>&1)
+assert_not_contains "$output" $'\033[90m=' "NO_COLOR keeps show values plain"
+
 # Test: --env-file with no command lists that file only
 output=$("$SCRIPT_PATH" use -e "$MONO/.env" 2>/dev/null | tr -s ' ')
 assert_equals "$(printf 'ROOT_ONLY %s\nSHARED %s' "$MONO/.env" "$MONO/.env")" "$output" "Lists names from explicit env file"

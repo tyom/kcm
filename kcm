@@ -488,9 +488,11 @@ mask_value() {
 
 # Print merged variables sorted by name.
 # show_values: false (name and source file), masked or full (NAME=value)
+# colour: true dims the = and source files and tints values
 print_merged_env() {
-  local _kcm_show_values="$1"
+  local _kcm_show_values="$1" _kcm_dim="" _kcm_tint="" _kcm_off=""
   local _kcm_width=0 _kcm_name _kcm_k _kcm_value
+  if [ "${2:-false}" = true ]; then _kcm_dim=$'\033[90m'; _kcm_tint=$'\033[36m'; _kcm_off=$'\033[0m'; fi
   for _kcm_name in ${_KCM_MERGED_NAMES[@]+"${_KCM_MERGED_NAMES[@]}"}; do
     [ "${#_kcm_name}" -gt "$_kcm_width" ] && _kcm_width=${#_kcm_name}
   done
@@ -500,14 +502,19 @@ print_merged_env() {
     printf '%s %s\n' "${_KCM_MERGED_NAMES[$_kcm_k]}" "$_kcm_k"
   done | LC_ALL=C sort | while read -r _kcm_name _kcm_k; do
     if [ "$_kcm_show_values" = false ]; then
-      printf '%-*s  %s\n' "$_kcm_width" "$_kcm_name" "${_KCM_MERGED_SOURCES[$_kcm_k]}"
+      printf '%-*s  %s%s%s\n' "$_kcm_width" "$_kcm_name" "$_kcm_dim" "${_KCM_MERGED_SOURCES[$_kcm_k]}" "$_kcm_off"
       continue
     fi
     _kcm_value="${_KCM_MERGED_VALUES[$_kcm_k]}"
     # printenv adds one newline; the x keeps any newlines of the value itself
     if is_exported "$_kcm_name"; then _kcm_value=$(printenv "$_kcm_name"; echo x); _kcm_value="${_kcm_value%$'\nx'}"; fi
-    [ "$_kcm_show_values" = masked ] && _kcm_value=$(mask_value "$_kcm_value")
-    printf '%s=%s\n' "$_kcm_name" "$_kcm_value"
+    if [ "$_kcm_show_values" = masked ]; then
+      _kcm_value=$(mask_value "$_kcm_value")
+      _kcm_value="${_kcm_value//…/${_kcm_dim}…${_kcm_tint}}"
+    fi
+    # Close and reopen the tint at each line break so less -R keeps it per line
+    _kcm_value="${_kcm_value//$'\n'/$_kcm_off$'\n'$_kcm_tint}"
+    printf '%s%s=%s%s%s%s\n' "$_kcm_name" "$_kcm_dim" "$_kcm_off" "$_kcm_tint" "$_kcm_value" "$_kcm_off"
   done
 }
 
@@ -596,11 +603,13 @@ use_secrets() {
 
   # No command: list what would be loaded
   if [ ${#_kcm_args[@]} -eq 0 ]; then
+    local _kcm_colour=false
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then _kcm_colour=true; fi
     if [ "$_kcm_show_values" = full ] && [ -t 1 ]; then
       # less keeps secrets off the scrollback: -+F -+X force its separate screen even if $LESS disables it
-      print_merged_env full | less -+F -+X || true
+      print_merged_env full "$_kcm_colour" | less -R -+F -+X || true
     else
-      print_merged_env "$_kcm_show_values"
+      print_merged_env "$_kcm_show_values" "$_kcm_colour"
     fi
     return 0
   fi
