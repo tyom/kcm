@@ -863,6 +863,9 @@ assert_exit_code 1 "$exit_code" "Export refuses a folder others can write to"
 [ -e "$TEST_DIR/shared/out.env" ] && fail "Writes nothing to a folder others can write to" || pass "Writes nothing to a folder others can write to"
 "$SCRIPT_PATH" export -e "$TEST_DIR/export.env" -o "$TEST_DIR/sticky/out.env" >/dev/null 2>&1 && exit_code=0 || exit_code=$?
 assert_exit_code 0 "$exit_code" "Export writes to a sticky folder"
+ln -s shared "$TEST_DIR/shared-link"
+output=$("$SCRIPT_PATH" export -e "$TEST_DIR/export.env" -o "$TEST_DIR/shared-link/out.env" 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Export checks the folder a symlink points to"
 
 # In a terminal the text goes to less; this stand-in records what it was given
 mkdir -p "$TEST_DIR/bin"

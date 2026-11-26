@@ -706,8 +706,11 @@ export_secrets() {
   if [ -n "$_kcm_out" ] && { [ -e "$_kcm_out" ] || [ -L "$_kcm_out" ]; }; then
     error_exit "'$_kcm_out' already exists"
   fi
-  # Others could swap the temp file in a folder they can write to, unless the sticky bit stops them
-  if [ -n "$_kcm_out" ] && [ -n "$(find "$(dirname "$_kcm_out")" -maxdepth 0 \( -perm -0020 -o -perm -0002 \) ! -perm -1000 2>/dev/null)" ]; then
+  # Others could swap the temp file in a folder they can write to, unless it is sticky and owned
+  # by root or you (a sticky folder's owner can still replace files). -H checks a symlink's target.
+  # shortcut: parent folders and ACLs are not checked, see SECURITY.md
+  if [ -n "$_kcm_out" ] && [ -n "$(find -H "$(dirname "$_kcm_out")" -maxdepth 0 \( -perm -0020 -o -perm -0002 \) \
+      ! \( -perm -1000 \( -user 0 -o -user "$(id -u)" \) \) 2>/dev/null)" ]; then
     error_exit "Other users can write to the folder of '$_kcm_out'. Export to a folder only you can write to"
   fi
 

@@ -77,6 +77,8 @@ We take security seriously. If you discover a vulnerability, please report it re
 
 **Memory Storage**: Secrets in environment variables remain in process memory and could be swapped to disk. Use FileVault.
 
+**Export**: `kcm export -o` writes plain values and trusts the folders on the output path. It creates the file readable only by you, never replaces an existing entry, and refuses a folder other users can write to unless it is sticky and owned by root or you. It doesn't check parent folders or macOS ACLs, so another local user who can rename a parent folder, or who has ACL rights on the folder, could get the file. Export into your own folders, and prefer `-c` on a shared Mac.
+
 ### Additional Mitigations
 
 If you need more security:
@@ -92,6 +94,7 @@ If you need more security:
 - Safe parsing without `eval` or `source`: values are exported as plain strings, so `$`, `` ` `` or `;` in a value never runs anything
 - `kcm add` passes the secret to `security` on stdin, not as a command-line argument, so it stays out of `ps` and process audit logs (values over about 2 KB still go through the argument list)
 - Clipboard auto-clear after 45 seconds, unless you have copied something else since
+- `kcm export -o` creates a new file readable only by you and never writes into an existing file, symlink or FIFO
 
 ## Security Checklist for Contributors
 
