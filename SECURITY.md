@@ -73,7 +73,7 @@ We take security seriously. If you discover a vulnerability, please report it re
 
 ### Other Limitations
 
-**Process Arguments**: kcm passes a value to `security` on stdin. A value over about 2 KB does not fit on one stdin line, so it goes through the argument list and is visible in `ps` for a few milliseconds to local users.
+**Process Arguments**: kcm passes a value to `security` on stdin. The key name, the comment and the value share one 4,095-byte stdin line. A value over about 2 KB does not fit, or a shorter one with a long name or comment, so it goes through the argument list and is visible in `ps` to local users while `security` runs.
 
 **Memory Storage**: Secrets in environment variables remain in process memory and could be swapped to disk. Use FileVault.
 

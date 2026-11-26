@@ -310,6 +310,12 @@ kcm use -- npm run dev
 kcm add STAGING_AWS_ACCESS_KEY_ID
 kcm add STAGING_AWS_SECRET_ACCESS_KEY
 
+# Point the names the script reads at those entries
+cat > .env.staging << EOF
+AWS_ACCESS_KEY_ID="keychain://STAGING_AWS_ACCESS_KEY_ID"
+AWS_SECRET_ACCESS_KEY="keychain://STAGING_AWS_SECRET_ACCESS_KEY"
+EOF
+
 # Run the script with only that file
 kcm use --env-file .env.staging -- ./deploy.sh
 ```
