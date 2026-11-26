@@ -282,9 +282,13 @@ store_secret() {
     target=("$_KCM_ITEM_KEYCHAIN")
     update=(-U)
     keychain_arg=" $(security_quote "$_KCM_ITEM_KEYCHAIN")"
-    # A hint someone wrote outlives a new value; kcm's own comments are replaced
-    if old=$(item_comment "$name") && [ -n "$old" ] && [[ "$old" != "Added by kcm" && "$old" != "Imported by kcm"* ]]; then
-      comment="$old"
+    # A hint someone wrote outlives a new value; kcm's own comments are replaced.
+    # Without a new hint, a failed lookup stops the write so it can't drop the old one.
+    if [ -z "$hint" ]; then
+      old=$(item_comment "$name") || { [ "$?" -ne 2 ] || return 1; }
+      if [ -n "$old" ] && [[ "$old" != "Added by kcm" && "$old" != "Imported by kcm"* ]]; then
+        comment="$old"
+      fi
     fi
   else
     status=$?
@@ -335,9 +339,10 @@ decode_security_value() {
 }
 
 # Print the comment of the item select_keychain_item chose. Attributes only, so no Keychain prompt.
+# Returns 1 when the item has no comment and 2 when the lookup itself failed.
 item_comment() {
   local out
-  out=$(security find-generic-password -s "$1" -a "$_KCM_ITEM_ACCOUNT" "$_KCM_ITEM_KEYCHAIN" 2>/dev/null) || return 1
+  out=$(security find-generic-password -s "$1" -a "$_KCM_ITEM_ACCOUNT" "$_KCM_ITEM_KEYCHAIN" 2>/dev/null) || return 2
   decode_security_value "$(sed -n 's/^ *"icmt"<blob>=//p' <<< "$out")"
 }
 
@@ -1551,7 +1556,8 @@ list_secrets() {
       if [ ${#service} -gt "$width" ]; then width=${#service}; fi
     fi
     case "$origin" in
-      kcm) ours+=("$service"); hints+=("${hint//$'\n'/ }") ;;
+      # Control characters become spaces, so an escape code in a hint never reaches the terminal
+      kcm) ours+=("$service"); hints+=("${hint//[[:cntrl:]]/ }") ;;
       legacy) legacy+=("$service") ;;
     esac
   done <<< "$services"

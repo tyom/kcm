@@ -188,6 +188,27 @@ output=$("$SCRIPT_PATH" show "$TEST_KEY" 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "Show secret exits successfully"
 assert_equals "test123" "$output" "Show returns correct secret value"
 
+# If the old hint can't be read, a new value must not replace it with kcm's default comment
+mkdir -p "$TEST_DIR/failcomment"
+cat > "$TEST_DIR/failcomment/security" << 'EOF'
+#!/bin/bash
+# Fail the attribute lookup for one account: no -g and no -i, so reads and writes still work
+if [ "${1:-}" = find-generic-password ] && [[ " $* " == *" -a "* && " $* " != *" -g "* ]]; then exit 1; fi
+exec /usr/bin/security "$@"
+EOF
+chmod +x "$TEST_DIR/failcomment/security"
+echo "hinted4" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "Keep me" >/dev/null 2>&1
+echo "hinted5" | PATH="$TEST_DIR/failcomment:$PATH" "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "add fails when the old hint can't be read"
+assert_contains "$(security find-generic-password -s "${TEST_KEY}_HINT" 2>&1)" '"icmt"<blob>="Keep me"' "A failed hint lookup leaves the hint alone"
+assert_equals "hinted4" "$("$SCRIPT_PATH" show "${TEST_KEY}_HINT" 2>&1)" "A failed hint lookup leaves the value alone"
+echo "hinted6" | PATH="$TEST_DIR/failcomment:$PATH" "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c "New hint" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 0 "$exit_code" "add -c works when the old hint can't be read"
+
+# A hint can hold escape codes, written by kcm or another tool; ls must not send them to the terminal
+echo "hinted5" | "$SCRIPT_PATH" add "${TEST_KEY}_HINT" - -c $'bad\033[2Jhint' >/dev/null 2>&1
+assert_not_contains "$("$SCRIPT_PATH" ls "${TEST_KEY}_HINT" 2>&1 | grep "${TEST_KEY}_HINT  ")" $'\033[2J' "ls strips control characters from a hint"
+
 # Test 5: List secrets
 output=$("$SCRIPT_PATH" ls 2>&1) && exit_code=$? || exit_code=$?
 assert_exit_code 0 "$exit_code" "List command exits successfully"
