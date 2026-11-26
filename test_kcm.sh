@@ -460,6 +460,9 @@ assert_equals "caller caller caller" "$output" "Exported names kcm uses internal
 printf 'value=file\nname=file\n' > "$TEST_DIR/names.env"
 output=$(value=caller name=caller "$SCRIPT_PATH" use --env-file "$TEST_DIR/names.env" --full 2>/dev/null | tr '\n' ' ')
 assert_equals "name=caller value=caller " "$output" "Listing shows exported values for names kcm uses internally"
+printf '_kcm_name=file\n' > "$TEST_DIR/reserved.env"
+output=$(_kcm_name=caller "$SCRIPT_PATH" use --env-file "$TEST_DIR/reserved.env" --full 2>&1 | cat)
+assert_contains "$output" "_kcm_name is reserved by kcm" "Listing refuses kcm's prefix even when exported"
 
 output=$(FOO=shell-value-at-least-24-chars "$SCRIPT_PATH" use --env-file "$TEST_ENV" -s 2>/dev/null)
 assert_equals "FOO=shel…hars" "$output" "Listing shows the environment value"

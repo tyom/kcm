@@ -551,6 +551,14 @@ load_env_files() {
   # Like dotenv, variables already in the environment are not overridden
   _KCM_EXPORTED_NAMES=$'\n'"$(compgen -e)"$'\n'
   merge_env_files
+
+  # kcm's locals use these prefixes, so one could hide an exported variable of the same name
+  local _kcm_k
+  for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
+    case "${_KCM_MERGED_NAMES[$_kcm_k]}" in
+      _KCM_*|_kcm_*) error_exit "${_KCM_MERGED_SOURCES[$_kcm_k]}: ${_KCM_MERGED_NAMES[$_kcm_k]} is reserved by kcm" ;;
+    esac
+  done
 }
 
 # Function to use secrets from env file
@@ -611,7 +619,6 @@ use_secrets() {
     _kcm_name="${_KCM_MERGED_NAMES[$_kcm_k]}"
     is_exported "$_kcm_name" && continue
     case "$_kcm_name" in
-      _KCM_*|_kcm_*) error_exit "${_KCM_MERGED_SOURCES[$_kcm_k]}: $_kcm_name is reserved by kcm" ;;
       # Bash sets these but they are plain, writable variables
       HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|OPTIND|OPTERR) continue ;;
       BASH_ENV|BASH_XTRACEFD|BASH_REMATCH|OPTARG|POSIXLY_CORRECT) ;;
@@ -705,13 +712,6 @@ export_secrets() {
   fi
 
   load_env_files "$_kcm_env_file"
-  # A local with kcm's prefix would hide an exported variable of the same name
-  local _kcm_k
-  for _kcm_k in "${!_KCM_MERGED_NAMES[@]}"; do
-    case "${_KCM_MERGED_NAMES[$_kcm_k]}" in
-      _KCM_*|_kcm_*) error_exit "${_KCM_MERGED_SOURCES[$_kcm_k]}: ${_KCM_MERGED_NAMES[$_kcm_k]} is reserved by kcm" ;;
-    esac
-  done
   resolve_env_values strict
   local _kcm_text _kcm_count=${#_KCM_MERGED_NAMES[@]}
   # The x keeps the final newline; the subshell's error_exit stops kcm too
