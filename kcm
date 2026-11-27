@@ -24,17 +24,19 @@ declare -a _KCM_PROCESSED_ENV_VALUES=()
 declare -a _KCM_PROCESSED_ENV_LINES=()
 
 # Helper functions
+# Messages can hold text from an env file or the Keychain. %s prints backslashes as they are,
+# and control characters become spaces, so that text can't send escape codes to the terminal.
 error_exit() {
-  echo -e "${_KCM_RED}Error: $1${_KCM_NC}" >&2
+  printf '%bError: %s%b\n' "$_KCM_RED" "${1//[[:cntrl:]]/ }" "$_KCM_NC" >&2
   exit 1
 }
 
 success() {
-  echo -e "${_KCM_GREEN}✓${_KCM_NC} $1" >&2
+  printf '%b✓%b %s\n' "$_KCM_GREEN" "$_KCM_NC" "${1//[[:cntrl:]]/ }" >&2
 }
 
 info() {
-  echo -e "${_KCM_YELLOW}ℹ${_KCM_NC} $1" >&2
+  printf '%bℹ%b %s\n' "$_KCM_YELLOW" "$_KCM_NC" "${1//[[:cntrl:]]/ }" >&2
 }
 
 show_help() {
@@ -611,7 +613,8 @@ mask_value() {
   local value="$1"
   if [ ${#value} -ge 24 ]; then
     value="${value:0:4}…${value: -4}"
-    printf '%s' "${value//$'\n'/ }"
+    # No control characters: a value can hold escape codes
+    printf '%s' "${value//[[:cntrl:]]/ }"
   elif [ -n "$value" ]; then
     printf '****'
   fi
@@ -657,10 +660,8 @@ load_env_files() {
     discover_env_files
   elif [ -f "$1" ]; then
     _KCM_ENV_FILES=("$1")
-  elif [ "${3:-}" = required ]; then
-    error_exit "Env file '$1' not found"
   else
-    info "Warning: env file '$1' not found, proceeding without it"
+    error_exit "Env file '$1' not found"
   fi
 
   # Like dotenv, variables already in the environment are not overridden
@@ -835,7 +836,7 @@ format_env_file() {
     elif [[ "$_kcm_value" != *'"'* && "$_kcm_value" != *'\n'* && "$_kcm_value" != *'\r'* ]]; then
       printf '%s="%s"\n' "$_kcm_name" "$_kcm_value"
     else
-      error_exit "Cannot quote $_kcm_name for an env file: its value has ' and also \" or a literal \\\\n or \\\\r"
+      error_exit "Cannot quote $_kcm_name for an env file: its value has ' and also \" or a literal \\n or \\r"
     fi
   done
 }
@@ -883,7 +884,7 @@ export_secrets() {
     error_exit "Other users can write to the folder of '$_kcm_out'. Export to a folder only you can write to"
   fi
 
-  load_env_files "$_kcm_env_file" "$_kcm_override" required
+  load_env_files "$_kcm_env_file" "$_kcm_override"
   warn_shell_overrides
   resolve_env_values strict
   local _kcm_text _kcm_count=${#_KCM_MERGED_NAMES[@]}
@@ -1243,6 +1244,8 @@ import_secrets() {
       value="${_KCM_PROCESSED_ENV_VALUES[$idx]}"
       [ -n "$value" ] || continue
       if [[ "$value" == keychain://* ]]; then
+        # Shown in the list, so no control characters
+        value="${value//[[:cntrl:]]/ }"
         ref_names[m]="${_KCM_PROCESSED_ENV_NAMES[$idx]}"
         ref_files[m]="$file"
         if ! [[ "$in_keychain" == *$'\n'"${value#keychain://}"$'\n'* ]]; then
