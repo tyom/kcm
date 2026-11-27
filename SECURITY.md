@@ -79,6 +79,8 @@ We take security seriously. If you discover a vulnerability, please report it re
 
 **Export**: `kcm export -o` writes plain values and trusts the folders on the output path. It creates the file readable only by you, never replaces an existing entry, and refuses a folder other users can write to unless it is sticky and owned by root or you. It doesn't check parent folders or macOS ACLs, so another local user who can rename a parent folder, or who has ACL rights on the folder, could get the file. Export into your own folders, and prefer `-c` on a shared Mac.
 
+**Clipboard**: `kcm copy` and `kcm export -c` clear the clipboard after 45 seconds. A clipboard history app (Raycast, Alfred, Maccy and similar) keeps its own copy, and `pbcopy` can't mark a value as a password for such apps to skip. Exclude your terminal in that app, or clear its history after copying.
+
 ### Additional Mitigations
 
 If you need more security:
