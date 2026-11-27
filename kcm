@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # kcm: Keychain Master - Secret management utility for macOS Keychain
-# Version: 0.5.0
+# Version: 0.6.0
 #
 # Run 'kcm help' for usage information
 
 set -euo pipefail
 
-_KCM_VERSION="0.5.0"
+_KCM_VERSION="0.6.0"
 _KCM_SCRIPT_NAME="$(basename "$0")"
 
 # Colors for output
