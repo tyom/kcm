@@ -59,7 +59,8 @@ Environment files are parsed manually without shell interpretation:
 
 - Split on first `=` only
 - Accept an optional `export ` prefix and CRLF line endings
-- Text after a closing quote is ignored, so `KEY="value" # note` works
+- Only a `#` comment may follow a closing quote, so `KEY="value" # note` works; other text is an error
+- Spaces and tabs around an unquoted value are dropped
 - Store in arrays before exporting
 - No code evaluation
 

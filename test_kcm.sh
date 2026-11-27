@@ -492,10 +492,25 @@ echo
 echo "Test Group: Edge Cases"
 echo "----------------------"
 
-# Test 19: Non-existent env file
-output=$("$SCRIPT_PATH" use --env-file /nonexistent.env -- echo test 2>&1) && exit_code=$? || exit_code=$?
-assert_exit_code 0 "$exit_code" "Continue with non-existent env file"
-assert_contains "$output" "not found" "Warning about missing file"
+# Test 19: A named env file that is missing stops use and export
+output=$("$SCRIPT_PATH" use --env-file /nonexistent.env -- echo started 2>&1) && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "use fails on a missing --env-file"
+assert_not_contains "$output" "started" "use does not run the command without its env file"
+"$SCRIPT_PATH" export -e /nonexistent.env -o "$TEST_DIR/missing-out.env" >/dev/null 2>&1 && exit_code=$? || exit_code=$?
+assert_exit_code 1 "$exit_code" "export fails on a missing --env-file"
+[ ! -e "$TEST_DIR/missing-out.env" ] && pass "export writes nothing for a missing --env-file" || fail "export wrote a file for a missing --env-file"
+
+# Text from an env file must not send escape codes to the terminal: backslash text stays
+# as typed, and a real escape byte becomes a space
+printf 'X=keychain://%s_NOPE\\033[31mRED\n' "$TEST_KEY" > "$TEST_DIR/esc.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/esc.env" -- true 2>&1)
+assert_contains "$output" "keychain://${TEST_KEY}_NOPE\\033[31mRED not found" "Backslash text in a warning stays as typed"
+printf 'X=keychain://%s_NOPE\033[31mRED\n' "$TEST_KEY" > "$TEST_DIR/esc.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/esc.env" -- true 2>&1)
+assert_contains "$output" "keychain://${TEST_KEY}_NOPE [31mRED not found" "Escape byte in a warning becomes a space"
+printf 'T=\033]0;aaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$TEST_DIR/esc.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/esc.env" --show-values 2>/dev/null)
+assert_equals "T= ]0;…aaaa" "$output" "Escape byte in a masked value becomes a space"
 
 # Test 20: Empty env file
 touch "$TEST_DIR/empty.env"
@@ -519,6 +534,17 @@ printf 'BEFORE=yes\nTOKEN="unfinished\nAFTER=no\n' > "$TEST_DIR/broken.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/broken.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
 assert_exit_code 1 "$exit_code" "Unclosed quote stops the command"
 assert_contains "$output" "$TEST_DIR/broken.env:2" "Unclosed quote reports its opening line"
+
+# Text after a closing quote must not turn the value into a multiline one that swallows SECRET
+printf 'A="a" b\nSECRET=shh\nC="c"\n' > "$TEST_DIR/after.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/after.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Text after a closing quote stops the command"
+assert_contains "$output" "$TEST_DIR/after.env:1" "Text after a closing quote reports its line"
+
+# Spaces around a value are dropped unless quoted, as in dotenv
+printf 'A=abc \nB= lead\nC= " q " \nD=a b\n' > "$TEST_DIR/spaces.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/spaces.env" -- bash -c 'printf "[%s]" "$A" "$B" "$C" "$D"' 2>&1)
+assert_equals "[abc][lead][ q ][a b]" "$output" "Spaces around an unquoted value are dropped"
 
 # A zero byte in an env file must not disappear on the way to a command or import.
 printf 'TOKEN=A\0B\n' > "$TEST_DIR/binary.env"
