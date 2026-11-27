@@ -307,7 +307,7 @@ store_secret() {
     # Without a new hint, a failed lookup stops the write so it can't drop the old one.
     # A kept hint is left out of the update: security then leaves it as it is, newlines and all.
     if [ -z "$hint" ]; then
-      old=$(item_comment "$name") || { [ "$?" -ne 2 ] || return 1; }
+      old=$(item_comment "$name") || { [ "$?" -eq 1 ] || return 1; }
       if [ -n "$old" ] && [[ "$old" != "Added by kcm" && "$old" != "Imported by kcm"* ]]; then
         keep=true
       fi
@@ -357,7 +357,8 @@ store_secret() {
   [ "$(item_comment "$name")" = "$comment" ]
 }
 
-# Print a secret's value.
+# Print a secret's value. Status 2 means the item cannot be selected.
+# Status 3 means the selected item contains a zero byte.
 # -w prints hex once a value has a newline or other non-printable byte, so parse -g instead:
 # it prints `password: "value"` or `password: 0x<hex>  "<escaped>"`.
 read_secret() {
@@ -380,7 +381,7 @@ decode_security_value() {
       out="${out%% *}"; out="${out#0x}"
       if [[ "$out" =~ ^([[:xdigit:]]{2})*00 ]]; then
         info "Cannot read Keychain data containing a zero byte"
-        return 2
+        return 3
       fi
       xxd -r -p <<< "$out" ;;
     \"*\") out="${out#\"}"; printf '%s' "${out%\"}" ;;
@@ -389,7 +390,7 @@ decode_security_value() {
 }
 
 # Print the comment of the item select_keychain_item chose. Attributes only, so no Keychain prompt.
-# Returns 1 when the item has no comment and 2 when the lookup itself failed.
+# Returns 1 for a missing comment, 2 for a lookup failure and 3 for binary data.
 item_comment() {
   local out
   out=$(security find-generic-password -s "$1" -a "$_KCM_ITEM_ACCOUNT" "$_KCM_ITEM_KEYCHAIN" 2>/dev/null) || return 2
@@ -595,7 +596,7 @@ resolve_env_values() {
       # Name, reference and checksum: a nested kcm use can tell this value from one the user set
       _KCM_RESOLVED="${_KCM_RESOLVED:-}"$'\n'"${_KCM_MERGED_NAMES[$k]}=${_KCM_MERGED_VALUES[$k]} $(printf '%s' "${value%x}" | cksum)"$'\n'
       _KCM_MERGED_VALUES[k]="${value%x}"
-    elif [ "$?" -eq 2 ]; then
+    elif [[ $? == [23] ]]; then
       error_exit "Cannot resolve ${_KCM_MERGED_VALUES[$k]} for ${_KCM_MERGED_NAMES[$k]}"
     elif [ "$strict" = strict ]; then
       error_exit "${_KCM_MERGED_VALUES[$k]} for ${_KCM_MERGED_NAMES[$k]} not found in Keychain"
@@ -1557,7 +1558,7 @@ show_secret() {
   if value=$(read_secret "$KEY_NAME" && printf x) && [ "$value" != x ]; then
     printf '%s\n' "${value%x}"
   else
-    [ "$?" -eq 2 ] && exit 1
+    [[ $? == [23] ]] && exit 1
     error_exit "Secret '$KEY_NAME' not found or unreadable in Keychain"
   fi
 }
@@ -1596,7 +1597,7 @@ copy_secret() {
     success "Secret '$KEY_NAME' copied to clipboard"
     info "Clipboard will be cleared in 45 seconds for security"
   else
-    [ "$?" -eq 2 ] && exit 1
+    [[ $? == [23] ]] && exit 1
     error_exit "Secret '$KEY_NAME' not found or unreadable in Keychain"
   fi
 }

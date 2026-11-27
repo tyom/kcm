@@ -37,7 +37,7 @@ cleanup() {
         while security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1; do :; done
     done
     security delete-generic-password -s "NEXT_PUBLIC_${TEST_KEY}_KEY" >/dev/null 2>&1 || true
-    for suffix in BINARY RACE_KEY API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT HINT ACCENT; do
+    for suffix in BINARY BINARY_TEXT RACE_KEY API_KEY MULTI CLASH RENAMED LEGACY OTHER_APP INJECTED LINK_KEY NL_KEY MOVED_KEY RO_KEY REF_KEY LONG DUP_KEY MID_KEY EXPORT HINT ACCENT; do
         security delete-generic-password -s "${TEST_KEY}_$suffix" >/dev/null 2>&1 || true
     done
 
@@ -309,6 +309,19 @@ security add-generic-password -s "${TEST_KEY}_BINARY" -a "$USER" -X 410042 || ex
 output=$("$SCRIPT_PATH" show "${TEST_KEY}_BINARY" 2>/dev/null) && exit_code=0 || exit_code=$?
 assert_exit_code 1 "$exit_code" "Show rejects a binary Keychain value"
 assert_equals "" "$output" "Show prints no partial binary credential"
+printf 'BINARY=keychain://%s_BINARY\n' "$TEST_KEY" > "$TEST_DIR/binary-ref.env"
+output=$(env -u BINARY "$SCRIPT_PATH" use -e "$TEST_DIR/binary-ref.env" -- echo ran 2>/dev/null) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Use rejects a binary Keychain reference"
+assert_equals "" "$output" "Use stops before running the command with a binary credential"
+
+# A selected binary credential can be kept, renamed or skipped during import.
+printf '%s_BINARY=file-value\n' "$TEST_KEY" > "$TEST_DIR/import-binary.env"
+output=$(printf '\no\nr\n%s_BINARY_TEXT\ny\n' "$TEST_KEY" | "$SCRIPT_PATH" import -e "$TEST_DIR/import-binary.env" 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 0 "$exit_code" "Import can rename a text value beside a binary credential"
+assert_contains "$output" "in Keychain, unreadable" "Import identifies the binary credential as unreadable"
+assert_contains "$output" "Cannot check an unreadable value" "Import refuses to overwrite the binary credential"
+assert_equals "${TEST_KEY}_BINARY=\"keychain://${TEST_KEY}_BINARY_TEXT\"" "$(cat "$TEST_DIR/import-binary.env")" "Import references the renamed credential"
+assert_equals "file-value" "$("$SCRIPT_PATH" show "${TEST_KEY}_BINARY_TEXT" 2>/dev/null)" "Renamed credential holds the file value"
 
 # show | add keeps trailing newlines, so it can retag an entry without changing its value
 printf 'abc\n\n' | "$SCRIPT_PATH" add "$TEST_KEY" - >/dev/null 2>&1
