@@ -535,6 +535,17 @@ output=$("$SCRIPT_PATH" use -e "$TEST_DIR/broken.env" -- echo ran 2>&1) && exit_
 assert_exit_code 1 "$exit_code" "Unclosed quote stops the command"
 assert_contains "$output" "$TEST_DIR/broken.env:2" "Unclosed quote reports its opening line"
 
+# Text after a closing quote must not turn the value into a multiline one that swallows SECRET
+printf 'A="a" b\nSECRET=shh\nC="c"\n' > "$TEST_DIR/after.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/after.env" -- echo ran 2>&1) && exit_code=0 || exit_code=$?
+assert_exit_code 1 "$exit_code" "Text after a closing quote stops the command"
+assert_contains "$output" "$TEST_DIR/after.env:1" "Text after a closing quote reports its line"
+
+# Spaces around a value are dropped unless quoted, as in dotenv
+printf 'A=abc \nB= lead\nC= " q " \nD=a b\n' > "$TEST_DIR/spaces.env"
+output=$("$SCRIPT_PATH" use -e "$TEST_DIR/spaces.env" -- bash -c 'printf "[%s]" "$A" "$B" "$C" "$D"' 2>&1)
+assert_equals "[abc][lead][ q ][a b]" "$output" "Spaces around an unquoted value are dropped"
+
 # A zero byte in an env file must not disappear on the way to a command or import.
 printf 'TOKEN=A\0B\n' > "$TEST_DIR/binary.env"
 output=$("$SCRIPT_PATH" use -e "$TEST_DIR/binary.env" -- printenv TOKEN 2>/dev/null) && exit_code=0 || exit_code=$?

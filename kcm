@@ -494,15 +494,22 @@ process_env_file() {
     [[ "$var_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     start=$lineno
 
+    # Like dotenv, spaces and tabs around a value are not part of it; quote the value to keep them
+    var_value="${var_value#"${var_value%%[![:blank:]]*}"}"
     case "$var_value" in
       \"*|\'*)
         quote_char="${var_value:0:1}"
         var_value="${var_value:1}"
-        # No closing quote on this line: multiline value
-        find_closing_quote "$var_value" "$quote_char" || continue
+        if ! find_closing_quote "$var_value" "$quote_char"; then
+          # No quote at all on this line: multiline value. A quote followed by more text is
+          # refused: read as multiline, it would swallow the lines below without a word
+          [[ "$var_value" != *"$quote_char"* ]] || error_exit "$env_file:$lineno: text after a $quote_char in $var_name. If the value spans lines, keep $quote_char off its first line"
+          continue
+        fi
         var_value="$_KCM_QUOTED_VALUE"
         quote_char=""
         ;;
+      *) var_value="${var_value%"${var_value##*[![:blank:]]}"}" ;;
     esac
     add_env_value "$var_name" "$var_value" "$start:$lineno"
   done < <(printf '%s' "$contents")

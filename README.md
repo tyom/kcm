@@ -274,7 +274,9 @@ Parsing rules:
 - Values are passed to the command as plain text. kcm never runs them through a shell, so `$`, `&` or `;` in a value stay as they are.
 - Single or double quotes around a value are removed. A quoted value can span several lines. A closing quote on a line of its own keeps the line break before it, as in dotenv.
 - Escapes are not expanded: `"a\nb"` stays a backslash and an `n`, where dotenv would make a line break. Put real line breaks in a multiline value such as a PEM key.
-- Text after the closing quote is ignored, so `API_KEY="keychain://API_KEY" # staging` works. In an unquoted value, a `#` is part of the value.
+- Only a `#` comment may follow the closing quote, so `API_KEY="keychain://API_KEY" # staging` works. Other text there, as in `A="a" b`, stops parsing with the file and line. In an unquoted value, a `#` is part of the value.
+- Spaces and tabs around an unquoted value are dropped, as in dotenv. Quote the value to keep them.
+- The first line of a value that spans lines can't contain its quote character.
 - An unfinished quoted value stops parsing. The error names the file and opening line.
 - `kcm use` rejects assignments to Bash-managed variables such as `UID`, `RANDOM` and `IFS` before reading secrets. Variables already exported by the caller still take precedence, unless you pass `--override`.
 - An `export ` prefix is allowed: `export PORT=3000`.
