@@ -73,7 +73,7 @@ To add a hint to a secret you already have, pipe its value back in:
 kcm show STRIPE_KEY | kcm add STRIPE_KEY - -c "Test mode key, from the Stripe dashboard"
 ```
 
-Multiline secrets such as PEM keys work through stdin. Adding a name that already exists updates its value. If the name matches several Keychain entries ambiguously, `add` refuses to change any of them.
+Multiline secrets such as PEM keys work through stdin. Secrets and env files must be text. KCM rejects a zero byte before it can change the value. Adding a name that already exists updates its value. If the name matches several Keychain entries ambiguously, `add` refuses to change any of them.
 
 After adding, you'll get a `.env` entry like:
 
@@ -109,6 +109,8 @@ Names already in the Keychain stand out. Green means the Keychain has the same v
 Use ↑/↓ (or `j`/`k`) to move, Space to tick or untick, `a` to tick all (or untick all when everything is ticked) and Enter to continue. Long lists scroll. When input isn't a terminal, for example piped from a script, kcm prints a numbered list instead and reads numbers or ranges such as `3` or `1-2`.
 
 - Each value is stored under its variable name, without leading underscores (`_TOKEN` is stored as `TOKEN`). If that name is already in the Keychain with a different value, kcm asks whether to overwrite it, keep the Keychain value, store under another name (default `<REPO>_<NAME>`) or skip.
+- Import checks the approved value again before an overwrite. If a credential appears or changes during confirmation, its row fails and the plain value stays in the file. For an unreadable credential, choose keep, rename or skip.
+- To import a file reached through a symbolic link, pass the target file with `-e`.
 - Files tracked by git and names with a public prefix (`NEXT_PUBLIC_`, `VITE_` and similar) are never ticked for you. If you import from a tracked file, rotate the secret: the old value stays in git history.
 - After a final confirmation, kcm stores each value, reads it back, and only then replaces its line with `NAME="keychain://LABEL"`. A comment after the value goes with it. Other lines stay as they are. kcm keeps no backup, since it would hold the plain values.
 - Without `-e`, every `.env` and `.env.*` file is scanned, not only the current `NODE_ENV`. Files ending in `.example`, `.sample` or `.template` are skipped.
@@ -127,7 +129,7 @@ kcm export -e .env.local | …  # or pipe it
 
 `export` loads the same files as `kcm use`, and variables already in your environment win in the same way. When one hides a different value from the file, kcm names it in a warning, because that shell value is what the export contains. `--override` writes the file's value instead. Export writes one `NAME='value'` line per variable, in quotes that kcm and dotenv both read as is, so `kcm use -e shared.env` gives the same values back. Values that contain `'` use double quotes instead.
 
-- If a `keychain://` entry is missing, export fails and writes nothing.
+- Export fails before writing if the file named by `-e` is missing, a Keychain entry is missing, or a final value starts with the literal text `keychain://`. That prefix would trigger another lookup when the file is loaded.
 - `-o` creates the file readable only by you and never overwrites one. It refuses a folder other users can write to, unless it has the sticky bit and you or root own it, like `/tmp`. It doesn't check parent folders or ACLs, so export into your own folders (see [SECURITY.md](SECURITY.md)). If git doesn't ignore the file, kcm warns.
 - Without `-o` or `-c`, the output opens in `less` in a terminal, like `kcm use --full`, so secrets don't stay in your scrollback. When piped, kcm prints it as is.
 

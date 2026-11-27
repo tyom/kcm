@@ -173,6 +173,26 @@ ENVIRONMENT VARIABLE FORMAT:
 EOF
 }
 
+# Read bytes up to EOF. A successful NUL-delimited read found a byte Bash cannot store.
+read_add_value() {
+  local input
+  if LC_ALL=C IFS= read -r -d '' input; then error_exit "A secret cannot contain a zero byte"; fi
+  # Remove one input newline. The sentinel protects any others from command substitution.
+  printf '%sx' "${input%$'\n'}"
+}
+
+# The terminal handles line editing while head passes the original bytes to read_add_value.
+read_hidden_line() (
+  if [ -t 0 ]; then
+    local mode
+    mode=$(stty -g) || exit 1
+    trap 'stty "$mode"' EXIT
+    trap 'exit 130' HUP INT TERM
+    stty -echo || exit 1
+  fi
+  head -n 1
+)
+
 # Function to add secret to keychain
 add_secret() {
   # Check if running on macOS
@@ -232,22 +252,13 @@ add_secret() {
     # Interactive mode - prompt for value
     info "Enter secret value for $KEY_NAME (input will be hidden):"
     echo -e "${_KCM_GREY}For long secrets (>1000 chars), use: ${_KCM_GREEN}pbpaste | $_KCM_SCRIPT_NAME add $KEY_NAME -${_KCM_NC}" >&2
-    IFS= read -rs SECRET_VALUE
-    echo "" >&2  # New line after hidden input
-
-    if [ -z "$SECRET_VALUE" ]; then
-      error_exit "Secret value cannot be empty"
-    fi
+    SECRET_VALUE=$(read_hidden_line | read_add_value) || exit 1
+    echo "" >&2
   else
-    # Strip only the one newline echo or show adds; the x keeps any others
-    SECRET_VALUE=$(cat; printf x)
-    SECRET_VALUE="${SECRET_VALUE%x}"
-    SECRET_VALUE="${SECRET_VALUE%$'\n'}"
-
-    if [ -z "$SECRET_VALUE" ]; then
-      error_exit "No input received from stdin"
-    fi
+    SECRET_VALUE=$(read_add_value) || exit 1
   fi
+  SECRET_VALUE="${SECRET_VALUE%x}"
+  [ -n "$SECRET_VALUE" ] || error_exit "Secret value cannot be empty"
 
   if store_secret "$KEY_NAME" "$SECRET_VALUE" "" "$hint"; then
     success "Secret added to Keychain"
@@ -285,8 +296,9 @@ byte_length() {
 # Kind "kcm secret" and creator "kcm " mark kcm's entries; these attributes are not encrypted.
 store_secret() {
   local name="$1" value="$2" comment="${3:-Added by kcm}" hint="${4:-}" account hex cmd got old
-  local update=() target=() status keychain_arg="" keep=false
+  local update=() target=() status keychain_arg="" keep=false expected="${5:-}"
   if select_keychain_item "$name"; then
+    [ "$expected" != absent ] || return 1
     account="$_KCM_ITEM_ACCOUNT"
     target=("$_KCM_ITEM_KEYCHAIN")
     update=(-U)
@@ -295,7 +307,7 @@ store_secret() {
     # Without a new hint, a failed lookup stops the write so it can't drop the old one.
     # A kept hint is left out of the update: security then leaves it as it is, newlines and all.
     if [ -z "$hint" ]; then
-      old=$(item_comment "$name") || { [ "$?" -ne 2 ] || return 1; }
+      old=$(item_comment "$name") || { [ "$?" -eq 1 ] || return 1; }
       if [ -n "$old" ] && [[ "$old" != "Added by kcm" && "$old" != "Imported by kcm"* ]]; then
         keep=true
       fi
@@ -303,6 +315,7 @@ store_secret() {
   else
     status=$?
     [ "$status" -eq 44 ] || return 1
+    [[ "$expected" != =* ]] || return 1
     account="$USER"
   fi
   if [ -n "$hint" ]; then comment="$hint"; fi
@@ -322,6 +335,11 @@ store_secret() {
     comment_args=(-j "$comment")
     cmd="add-generic-password ${update[*]-} -s \"$name\" -a $(security_quote "$account") -D \"kcm secret\" -c \"kcm \" -j $(security_quote "$comment") -X $hex$keychain_arg"
   fi
+  # Import only updates the value the user saw when approving this overwrite.
+  if [[ "$expected" == =* ]]; then
+    got=$(read_selected_secret "$name" && printf x) || return 1
+    [ "=$got" = "${expected}x" ] || return 1
+  fi
   if [ "$(byte_length "$cmd")" -lt 4096 ]; then
     printf '%s\n' "$cmd" | security -i >/dev/null 2>&1
   else
@@ -339,12 +357,17 @@ store_secret() {
   [ "$(item_comment "$name")" = "$comment" ]
 }
 
-# Print a secret's value.
+# Print a secret's value. Status 2 means the item cannot be selected.
+# Status 3 means the selected item contains a zero byte.
 # -w prints hex once a value has a newline or other non-printable byte, so parse -g instead:
 # it prints `password: "value"` or `password: 0x<hex>  "<escaped>"`.
 read_secret() {
-  local out
   select_keychain_item "$1" || return $?
+  read_selected_secret "$1"
+}
+
+read_selected_secret() {
+  local out
   out=$(security find-generic-password -s "$1" -a "$_KCM_ITEM_ACCOUNT" -g "$_KCM_ITEM_KEYCHAIN" 2>&1 >/dev/null) || return 1
   decode_security_value "$(sed -n 's/^password: //p' <<< "$out")"
 }
@@ -354,14 +377,20 @@ read_secret() {
 decode_security_value() {
   local out="$1"
   case "$out" in
-    0x*) out="${out%% *}"; xxd -r -p <<< "${out#0x}" ;;
+    0x*)
+      out="${out%% *}"; out="${out#0x}"
+      if [[ "$out" =~ ^([[:xdigit:]]{2})*00 ]]; then
+        info "Cannot read Keychain data containing a zero byte"
+        return 3
+      fi
+      xxd -r -p <<< "$out" ;;
     \"*\") out="${out#\"}"; printf '%s' "${out%\"}" ;;
     *) return 1 ;;
   esac
 }
 
 # Print the comment of the item select_keychain_item chose. Attributes only, so no Keychain prompt.
-# Returns 1 when the item has no comment and 2 when the lookup itself failed.
+# Returns 1 for a missing comment, 2 for a lookup failure and 3 for binary data.
 item_comment() {
   local out
   out=$(security find-generic-password -s "$1" -a "$_KCM_ITEM_ACCOUNT" "$_KCM_ITEM_KEYCHAIN" 2>/dev/null) || return 2
@@ -430,7 +459,12 @@ process_env_file() {
   _KCM_PROCESSED_ENV_NAMES=()
   _KCM_PROCESSED_ENV_VALUES=()
   _KCM_PROCESSED_ENV_LINES=()
-  [ -f "$env_file" ] || return 0
+  [ -f "$env_file" ] || error_exit "Env file '$env_file' not found"
+
+  local contents
+  {
+    if LC_ALL=C IFS= read -r -d '' contents; then error_exit "$env_file contains a zero byte"; fi
+  } < "$env_file" || error_exit "Cannot read $env_file"
 
   local line var_name="" var_value="" quote_char="" lineno=0 start=0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -469,7 +503,7 @@ process_env_file() {
         ;;
     esac
     add_env_value "$var_name" "$var_value" "$start:$lineno"
-  done < "$env_file"
+  done < <(printf '%s' "$contents")
   if [ -n "$quote_char" ]; then
     error_exit "$env_file:$start: unclosed quote for $var_name"
   fi
@@ -562,7 +596,7 @@ resolve_env_values() {
       # Name, reference and checksum: a nested kcm use can tell this value from one the user set
       _KCM_RESOLVED="${_KCM_RESOLVED:-}"$'\n'"${_KCM_MERGED_NAMES[$k]}=${_KCM_MERGED_VALUES[$k]} $(printf '%s' "${value%x}" | cksum)"$'\n'
       _KCM_MERGED_VALUES[k]="${value%x}"
-    elif [ "$?" -eq 2 ]; then
+    elif [[ $? == [23] ]]; then
       error_exit "Cannot resolve ${_KCM_MERGED_VALUES[$k]} for ${_KCM_MERGED_NAMES[$k]}"
     elif [ "$strict" = strict ]; then
       error_exit "${_KCM_MERGED_VALUES[$k]} for ${_KCM_MERGED_NAMES[$k]} not found in Keychain"
@@ -623,6 +657,8 @@ load_env_files() {
     discover_env_files
   elif [ -f "$1" ]; then
     _KCM_ENV_FILES=("$1")
+  elif [ "${3:-}" = required ]; then
+    error_exit "Env file '$1' not found"
   else
     info "Warning: env file '$1' not found, proceeding without it"
   fi
@@ -789,6 +825,9 @@ format_env_file() {
     _kcm_value="${_KCM_MERGED_VALUES[$_kcm_k]}"
     # printenv adds one newline; the x keeps any newlines of the value itself
     if is_exported "$_kcm_name"; then _kcm_value=$(printenv "$_kcm_name"; echo x); _kcm_value="${_kcm_value%$'\nx'}"; fi
+    if [[ "$_kcm_value" == keychain://* ]]; then
+      error_exit "Cannot export $_kcm_name: its text would be read as a Keychain reference"
+    fi
     if [[ "$_kcm_value" == *$'\r'* ]]; then
       error_exit "Cannot quote $_kcm_name for an env file: its value has a carriage return"
     elif [[ "$_kcm_value" != *"'"* ]]; then
@@ -844,7 +883,7 @@ export_secrets() {
     error_exit "Other users can write to the folder of '$_kcm_out'. Export to a folder only you can write to"
   fi
 
-  load_env_files "$_kcm_env_file" "$_kcm_override"
+  load_env_files "$_kcm_env_file" "$_kcm_override" required
   warn_shell_overrides
   resolve_env_values strict
   local _kcm_text _kcm_count=${#_KCM_MERGED_NAMES[@]}
@@ -892,7 +931,19 @@ install_wrapper() {
     path="${path:-$default}"
   fi
   case "$path" in /*|..|../*|*/../*|*/..) error_exit "Location must be inside the git root" ;; esac
-  target="$root/$path"
+  # Work from each physical parent so a link cannot redirect a later mkdir or write.
+  local remaining="$path" dir
+  cd -P -- "$root"
+  while [[ "$remaining" == */* ]]; do
+    dir="${remaining%%/*}"
+    remaining="${remaining#*/}"
+    [ -n "$dir" ] || continue
+    if [ ! -d "./$dir" ]; then mkdir "./$dir" || error_exit "Cannot create directory for $path"; fi
+    cd -P -- "./$dir" || error_exit "Cannot enter directory for $path"
+    [[ "$PWD" == "$root" || "$PWD" == "${root%/}/"* ]] || error_exit "Location must be inside the git root"
+  done
+  [ -n "$remaining" ] || error_exit "Expected a file name"
+  target="./$remaining"
 
   local script
   script=$(cat << 'WRAPPER'
@@ -904,15 +955,22 @@ exec "$@"
 WRAPPER
 )
 
+  [ ! -L "$target" ] || error_exit "Wrapper destination is a symbolic link: $path"
   if [ -e "$target" ]; then
-    [ "$(cat "$target")" = "$script" ] || error_exit "$path already exists and is not the kcm wrapper"
+    if [ ! -f "$target" ] || ! printf '%s\n' "$script" | cmp -s - "$target"; then
+      error_exit "$path already exists and is not the kcm wrapper"
+    fi
+    [ -x "$target" ] || chmod -h +x "$target"
     info "$path is already installed"
   else
-    mkdir -p "$(dirname "$target")"
-    printf '%s\n' "$script" > "$target"
+    _KCM_WRAPPER_TMP=$(mktemp ./.kcm-wrapper.XXXXXX)
+    trap 'rm -f "$_KCM_WRAPPER_TMP"' EXIT
+    trap 'exit 130' INT TERM
+    printf '%s\n' "$script" > "$_KCM_WRAPPER_TMP"
+    chmod '=rx,u+w' "$_KCM_WRAPPER_TMP"
+    link "$_KCM_WRAPPER_TMP" "$target" || error_exit "Cannot install $path"
     success "Installed $path"
   fi
-  chmod +x "$target"
   info "Use it in scripts, e.g. \"dev\": \"$path vite\", and commit it"
 }
 
@@ -1122,10 +1180,9 @@ rewrite_env_file() {
     # The loop's status is only its last command's, so check every write
     printf '%s\n' "$out" || { rm -f "$tmp"; return 1; }
   done < "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
-  # shortcut: mv replaces a symlinked env file with a regular file; resolve links if that comes up
   # /usr/bin/stat: GNU stat from coreutils takes different flags. -L: the mode of the file read, not of a link
   # Checked last, so an edit at any point since the scan (prompts, Keychain writes) is caught
-  if [ "$(cksum < "$file")" != "$sum" ]; then
+  if [ -L "$file" ] || [ "$(cksum < "$file")" != "$sum" ]; then
     rm -f "$tmp"
     _KCM_IMPORT_TMP=""
     return 2
@@ -1160,6 +1217,10 @@ import_secrets() {
     discover_import_files
     [ ${#_KCM_ENV_FILES[@]} -gt 0 ] || error_exit "No .env files found"
   fi
+  local file
+  for file in "${_KCM_ENV_FILES[@]}"; do
+    [ ! -L "$file" ] || error_exit "Cannot import through a symbolic link: $file. Use -e with its target."
+  done
   local list
   printf -v list '%s, ' "${_KCM_ENV_FILES[@]}"
   info "Scanning ${list%, }"
@@ -1169,7 +1230,7 @@ import_secrets() {
   local -a labels=() kc_states=() kc_values=()
   # Lines that already hold a keychain:// reference, shown after the others
   local -a ref_names=() ref_files=() ref_whys=() ref_marks=() ref_tints=()
-  local file idx value why state tick tint is_tracked label existing n=0 m=0 in_keychain sum
+  local idx value why state tick tint is_tracked label existing n=0 m=0 in_keychain sum
   # One attribute dump instead of a lookup per variable
   in_keychain=$'\n'"$(keychain_services '.*' | cut -d' ' -f2- | cut -f1 | LC_ALL=C sort -u)"$'\n'
   for file in "${_KCM_ENV_FILES[@]}"; do
@@ -1320,15 +1381,22 @@ import_secrets() {
           found=true; existing=""; shown="unreadable"
         fi
       fi
-      if [ "$found" = false ]; then actions[i]=store; break; fi
+      if [ "$found" = false ]; then actions[i]=store; ref_values[i]=absent; break; fi
       # What the reference should find when the file is rewritten; unreadable entries can only be checked for existence
       if [ -n "$shown" ]; then ref_values[i]="?"; else ref_values[i]="=$existing"; fi
       if [ -z "$shown" ] && [ "$existing" = "${values[i]}" ]; then actions[i]=ref; break; fi
 
       info "$label is $clash_with with a different value (${shown:-$(mask_value "$existing")}) than ${files[i]} ($(mask_value "${values[i]}"))"
-      IFS= read -r -p "[o]verwrite  [k]eep that value (drops the file value)  [r]ename  [s]kip: " answer || abort_import
+      local choices="[k]eep that value (drops the file value)  [r]ename  [s]kip"
+      [ -n "$shown" ] || choices="[o]verwrite  $choices"
+      IFS= read -r -p "$choices: " answer || abort_import
       case "$answer" in
-        o|O) actions[i]=store; break ;;
+        o|O)
+          if [ -n "$shown" ]; then
+            info "Cannot check an unreadable value before overwriting it. Keep it, rename the new value, or skip."
+            continue
+          fi
+          actions[i]=store; break ;;
         k|K) actions[i]=ref; break ;;
         s|S) break ;;
         q|Q) abort_import ;;
@@ -1366,7 +1434,7 @@ import_secrets() {
   for file in "${touched[@]}"; do
     for (( i=0; i<n; i++ )); do
       [ "${files[i]}" = "$file" ] || continue
-      [ "$(cksum < "$file")" = "${sums[i]}" ] && break
+      [ ! -L "$file" ] && [ "$(cksum < "$file")" = "${sums[i]}" ] && break
       info "Warning: $file changed since the scan, leaving it as is; run import again"
       failed=true
       for (( j=0; j<n; j++ )); do
@@ -1382,7 +1450,7 @@ import_secrets() {
     [ "${actions[i]}" = store ] || continue
     source_path="$(cd "$(dirname "${files[i]}")" && pwd -P)/${files[i]##*/}"
     case "$source_path" in "$HOME"/*) source_path="~${source_path#"$HOME"}" ;; esac
-    if ! store_secret "${labels[i]}" "${values[i]}" "Imported by kcm from $source_path"; then
+    if ! store_secret "${labels[i]}" "${values[i]}" "Imported by kcm from $source_path" "" "${ref_values[i]}"; then
       info "Warning: could not store ${names[i]} from ${files[i]}, leaving it as is"
       failed=true
       # Rows that chose to keep this value would point at an entry that never got it
@@ -1490,7 +1558,7 @@ show_secret() {
   if value=$(read_secret "$KEY_NAME" && printf x) && [ "$value" != x ]; then
     printf '%s\n' "${value%x}"
   else
-    [ "$?" -eq 2 ] && exit 1
+    [[ $? == [23] ]] && exit 1
     error_exit "Secret '$KEY_NAME' not found or unreadable in Keychain"
   fi
 }
@@ -1529,7 +1597,7 @@ copy_secret() {
     success "Secret '$KEY_NAME' copied to clipboard"
     info "Clipboard will be cleared in 45 seconds for security"
   else
-    [ "$?" -eq 2 ] && exit 1
+    [[ $? == [23] ]] && exit 1
     error_exit "Secret '$KEY_NAME' not found or unreadable in Keychain"
   fi
 }
