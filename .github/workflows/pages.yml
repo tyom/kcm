@@ -1,4 +1,4 @@
-name: Repo Intel
+name: Pages
 
 on:
   push:
@@ -21,19 +21,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0 # repo-intel reads the full commit history
-
-      - name: Generate repo intel
-        uses: tyom/repo-intel@v1
-        with:
-          contributors: "10"
-          output: public
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: public
+          path: docs
 
   deploy:
     needs: build

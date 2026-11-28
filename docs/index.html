@@ -1,0 +1,850 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>kcm: keep .env secrets in the macOS Keychain</title>
+    <meta
+      name="description"
+      content="kcm is a command-line tool for macOS. It moves the secrets in your .env files into the Keychain and fills them in when you run a command."
+    />
+    <link rel="canonical" href="https://tyom.github.io/kcm/" />
+    <!-- Link previews in chat apps. og.png is a screenshot of the top of this page in dark mode -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="kcm" />
+    <meta property="og:url" content="https://tyom.github.io/kcm/" />
+    <meta property="og:title" content="kcm: keep .env secrets in the macOS Keychain" />
+    <meta
+      property="og:description"
+      content="kcm is a command-line tool for macOS. It moves the secrets in your .env files into the Keychain and fills them in when you run a command."
+    />
+    <meta property="og:image" content="https://tyom.github.io/kcm/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="The kcm home page. Headline: Keep your .env files. Move the secrets to the macOS Keychain."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔑</text></svg>"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --evergreen: #16302b;
+        --grape: #694873;
+        --sand: #f3d3bd;
+        --teal: #85b79d;
+        --red: #bd1e1e;
+        --term-bg: color-mix(in srgb, var(--evergreen) 25%, black);
+        --term-ink: color-mix(in srgb, var(--sand) 40%, white);
+
+        --bg: color-mix(in srgb, var(--sand) 40%, white);
+        --panel: var(--sand);
+        --ink: var(--evergreen);
+        --muted: color-mix(in srgb, var(--evergreen) 75%, var(--sand));
+        --rule: color-mix(in srgb, var(--evergreen) 25%, var(--sand));
+        --link: var(--grape);
+        --typed-ink: black;
+        /* Black is close to the evergreen text, so weight carries it in light mode */
+        --typed-weight: 600;
+        --ref-ink: var(--grape);
+        /* A more vivid Vintage Grape, for the keychain:// prefix */
+        --mark-ink: #84279d;
+        /* Darkened a little: plain red on Desert Sand is 4.4:1 */
+        --leak: color-mix(in srgb, var(--red) 85%, var(--evergreen));
+        --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: var(--evergreen);
+          --panel: color-mix(in srgb, var(--evergreen) 75%, black);
+          --ink: var(--sand);
+          --muted: color-mix(in srgb, var(--sand) 70%, var(--evergreen));
+          --rule: color-mix(in srgb, var(--teal) 25%, var(--evergreen));
+          --link: var(--teal);
+          /* Plain grape is too dark to read on evergreen */
+          --typed-ink: white;
+          --typed-weight: 400;
+          --ref-ink: color-mix(in srgb, var(--grape) 50%, white);
+          --mark-ink: #f8ccff;
+          /* Plain red is too dark to read on evergreen */
+          --leak: color-mix(in srgb, var(--red) 50%, var(--sand));
+        }
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font: 1.0625rem/1.6 var(--sans);
+        -webkit-text-size-adjust: 100%;
+      }
+      .wrap {
+        max-width: 66rem;
+        margin: 0 auto;
+        padding: 0 1.5rem;
+      }
+      ::selection {
+        background: var(--teal);
+        color: var(--evergreen);
+      }
+      pre {
+        scrollbar-color: var(--muted) transparent;
+        scrollbar-width: thin;
+      }
+      a {
+        color: var(--link);
+        text-underline-offset: 0.2em;
+      }
+      a:hover {
+        text-decoration-thickness: 2px;
+      }
+      :focus-visible {
+        outline: 2px solid var(--link);
+        outline-offset: 3px;
+        border-radius: 2px;
+      }
+      h1,
+      h2,
+      h3 {
+        line-height: 1.15;
+        text-wrap: balance;
+        margin: 0;
+      }
+      p {
+        margin: 0;
+        max-width: 38em;
+      }
+      p,
+      li {
+        text-wrap: pretty; /* no single word left on the last line */
+      }
+      p + p {
+        margin-top: 0.8em;
+      }
+      code,
+      kbd,
+      pre {
+        font-family: var(--mono);
+        font-size: 0.875em;
+      }
+      /* What the reader types: commands, flags and file content they write */
+      kbd,
+      .typed {
+        color: var(--typed-ink);
+        font-weight: var(--typed-weight);
+      }
+      pre {
+        margin: 0;
+        padding: 1rem 1.25rem;
+        overflow-x: auto;
+        background: var(--panel);
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+        font-size: 0.8125rem;
+        line-height: 1.7;
+        tab-size: 2;
+      }
+      pre code {
+        font-size: inherit;
+      }
+      :not(pre) > code,
+      kbd {
+        white-space: nowrap;
+      }
+      .c {
+        color: var(--muted);
+        font-weight: 400;
+      }
+      .ref {
+        color: var(--ref-ink);
+        font-weight: 600;
+      }
+      mark {
+        background: none;
+        color: var(--mark-ink);
+        font-weight: 700;
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        .swap mark {
+          animation: ink 0.6s 0.5s ease-out backwards;
+        }
+        .swap .ref:nth-of-type(2) mark {
+          animation-delay: 0.8s;
+        }
+      }
+      @keyframes ink {
+        from {
+          color: var(--muted);
+        }
+      }
+      .leak {
+        color: var(--leak);
+        text-decoration: underline wavy;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 0.25em;
+      }
+      /* Hover the password: it shows as stars, as in the old bash.org joke */
+      .pw {
+        position: relative;
+      }
+      .pw:hover {
+        color: transparent;
+      }
+      .pw:hover::after {
+        content: "*******";
+        position: absolute;
+        left: 0;
+        color: var(--leak);
+      }
+
+      /* Top bar */
+      .top {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 1rem;
+        padding-top: 1.5rem;
+        padding-bottom: 1.5rem;
+      }
+      .top .name {
+        font: 700 1.125rem var(--mono);
+        color: var(--ink);
+        text-decoration: none;
+      }
+      .top ul {
+        display: flex;
+        gap: 1.5rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      /* Hero */
+      .hero {
+        padding-top: clamp(2.5rem, 8vw, 6rem);
+        padding-bottom: clamp(3rem, 8vw, 6rem);
+      }
+      .hero h1 {
+        font-size: clamp(2.25rem, 6.4vw, 4.5rem);
+        font-weight: 800;
+        letter-spacing: -0.035em;
+        line-height: 1.02;
+        max-width: 15em;
+      }
+      .hero .lede {
+        margin-top: 1.5rem;
+        font-size: 1.25rem;
+        line-height: 1.5;
+        color: var(--muted);
+      }
+      .swap {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
+        gap: 1.25rem;
+        margin-top: clamp(2.5rem, 6vw, 4rem);
+      }
+      .swap figure {
+        margin: 0;
+        min-width: 0;
+      }
+      .swap figcaption {
+        margin-bottom: 0.5rem;
+        color: var(--muted);
+        font-size: 0.9375rem;
+      }
+      .swap pre {
+        /* Small enough at 375px wide for a whole keychain:// line to fit */
+        font-size: clamp(0.75rem, 3.3vw, 0.875rem);
+        padding: 1.25rem clamp(1rem, 4vw, 1.5rem);
+      }
+      .then {
+        margin-top: 1.5rem;
+      }
+
+      /* Sections: name on the left, content on the right */
+      section {
+        padding: clamp(2.5rem, 6vw, 4.5rem) 0;
+        border-top: 1px solid var(--rule);
+      }
+      section > .wrap {
+        display: grid;
+        gap: 1.5rem 3rem;
+      }
+      section h2 {
+        font-size: 1.75rem;
+        font-weight: 750;
+        letter-spacing: -0.015em;
+      }
+      .body {
+        min-width: 0;
+        max-width: 46rem;
+      }
+      @media (min-width: 60rem) {
+        section > .wrap {
+          grid-template-columns: 13rem minmax(0, 1fr);
+        }
+        section h2 {
+          position: sticky;
+          top: 1.5rem;
+          align-self: start;
+          font-size: 1.5rem;
+        }
+      }
+
+      /* What it is */
+      .facts {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .facts li {
+        max-width: 38em;
+      }
+      .facts li + li {
+        margin-top: 1.25rem;
+      }
+      .facts strong {
+        display: block;
+      }
+
+      /* Use cases and install */
+      .case + .case {
+        margin-top: 3.5rem;
+      }
+      .case h3 {
+        scroll-margin-top: 1.5rem;
+        font-size: 1.375rem;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        margin-bottom: 0.5rem;
+      }
+      .case > * + * {
+        margin-top: 1rem;
+      }
+      .case h3 + * {
+        margin-top: 0;
+      }
+      /* The box is the panel and the button sits beside the code, so scrolled text never runs under it */
+      .copyable {
+        display: flex;
+        align-items: flex-start;
+        background: var(--panel);
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+      }
+      .copyable pre {
+        flex: 1;
+        min-width: 0;
+        border: 0;
+        background: none;
+      }
+      .copyable button {
+        flex: none;
+        margin: 0.75rem 0.75rem 0 0.5rem;
+        padding: 0.4rem 0.7rem;
+        font: 0.75rem var(--sans);
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--rule);
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      /* Read by screen readers, not shown */
+      .vh {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+      .copyable button:hover {
+        color: var(--ink);
+        border-color: var(--muted);
+      }
+      .copyable button:active {
+        transform: translateY(1px);
+      }
+      @media (pointer: coarse) {
+        .top a,
+        footer a {
+          display: inline-block;
+          padding-block: 0.75rem;
+        }
+        .copyable button {
+          min-width: 2.75rem;
+          min-height: 2.75rem;
+          margin: 0.3rem 0.3rem 0 0.5rem;
+        }
+      }
+      /* The import picker as the terminal draws it. Dark in both modes, colors from kcm's ANSI codes */
+      .term {
+        position: relative;
+        z-index: 1; /* passes over the sticky section name */
+        scrollbar-color: color-mix(in srgb, var(--sand) 55%, var(--evergreen)) transparent;
+        background: var(--term-bg);
+        color: var(--term-ink);
+        border: 0;
+      }
+      .term .cur {
+        background: #bcbcbc; /* xterm 250 and 234, as in kcm */
+        color: #1c1c1c;
+      }
+      .term .g,
+      .chip.g {
+        color: var(--teal);
+      }
+      .term .y,
+      .chip.y {
+        color: #f0b95a;
+        font-weight: 700;
+      }
+      .term .d,
+      .chip.d {
+        color: color-mix(in srgb, var(--sand) 55%, var(--evergreen));
+      }
+      @media (min-width: 60rem) {
+        .picker-guide {
+          display: none;
+        }
+        /* Wide rows: let it run across the section name's column too. Here kcm's own
+           behavior applies and rows are cut at the edge. Narrower screens scroll instead. */
+        .term {
+          margin-left: -16rem;
+        }
+      }
+      @media (min-width: 64rem) {
+        .term {
+          overflow: hidden;
+        }
+        .term code {
+          display: block;
+          overflow: hidden; /* clip inside the padding, not at the box edge */
+        }
+      }
+      /* What each row style in the picker means, with the mark drawn as the terminal draws it */
+      .legend {
+        padding: 0;
+        list-style: none;
+        font-size: 0.9375rem;
+      }
+      .legend li {
+        display: grid;
+        grid-template-columns: 2.75rem 1fr;
+        gap: 0.75rem;
+        align-items: baseline;
+      }
+      .legend li + li {
+        margin-top: 0.5rem;
+      }
+      .chip {
+        padding: 0.15em 0;
+        border-radius: 3px;
+        text-align: center;
+        background: var(--term-bg);
+        color: var(--term-ink);
+      }
+      .note {
+        max-width: none; /* captions run the full column, so short ones stay on one line */
+        color: var(--muted);
+        font-size: 0.9375rem;
+      }
+
+      footer {
+        border-top: 1px solid var(--rule);
+        padding: 2rem 0 3rem;
+        color: var(--muted);
+        font-size: 0.9375rem;
+      }
+      footer .wrap {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 0.75rem 2rem;
+      }
+      footer ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem 1.5rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+    </style>
+    <script>
+      !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],Object.defineProperty(u,"toString",{configurable:!0,enumerable:!0,writable:!0,value:function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e}}),Object.defineProperty(u.people,"toString",{configurable:!0,enumerable:!0,writable:!0,value:function(){return u.toString(1)+".people (stub)"}}),o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagResult isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+      posthog.init('phc_qfL98y5niQsRkQV93BWGYU5DmGNuYoAJG3WGKHfJQyPc', {
+        api_host: 'https://eu.i.posthog.com',
+        defaults: '2026-08-30',
+        persistence: 'memory', // no cookies or localStorage, so no consent banner needed
+      })
+    </script>
+  </head>
+  <body>
+    <header class="wrap top">
+      <a class="name" href="#top" aria-label="kcm, top of page">kcm</a>
+      <nav aria-label="Page">
+        <ul>
+          <li><a href="#use-cases">Use cases</a></li>
+          <li><a href="#install">Install</a></li>
+          <li><a href="https://github.com/tyom/kcm">GitHub</a></li>
+        </ul>
+      </nav>
+    </header>
+
+    <main>
+      <div class="wrap hero">
+        <h1>Keep your .env files. Move the secrets to the macOS Keychain.</h1>
+        <p class="lede">
+          <kbd>kcm import</kbd> lets you choose which values in <code>.env.local</code>
+          to store in your Mac's Keychain. It replaces those values with
+          <code><mark>keychain://</mark></code> references. Your teammates can keep
+          using plain values in their own <code>.env.local</code>.
+        </p>
+
+        <div class="swap">
+          <figure>
+            <figcaption>
+              <code>.env.local</code> with secrets in plain text
+            </figcaption>
+            <pre><code>DATABASE_URL=<span class="leak">postgres://u:<span class="pw">hunter2</span>@db</span>
+API_KEY=<span class="leak">a-key-anyone-can-read</span>
+PORT=3000</code></pre>
+          </figure>
+          <figure>
+            <figcaption>The same file after <kbd>kcm import</kbd></figcaption>
+            <pre><code>DATABASE_URL="<span class="ref"><mark>keychain://</mark>DATABASE_URL</span>"
+API_KEY="<span class="ref"><mark>keychain://</mark>API_KEY</span>"
+PORT=3000</code></pre>
+          </figure>
+        </div>
+        <p class="then">
+          Then start your app with <kbd>kcm use -- npm run dev</kbd>. It sees
+          <code>DATABASE_URL</code> and <code>API_KEY</code> as normal
+          environment variables.
+        </p>
+        <p>
+          kcm is for development secrets on your own Mac.
+          <a href="#install">Install kcm</a> or
+          <a href="#share-scripts">see how teammates can work without it</a>.
+        </p>
+      </div>
+
+      <section id="what">
+        <div class="wrap">
+          <h2>What it is</h2>
+          <div class="body">
+            <ul class="facts">
+              <li>
+                <strong>kcm is one Bash script.</strong>
+                It uses the <code>security</code> tool that ships with macOS and
+                needs no service or account. It runs on Bash 3.2 or later.
+              </li>
+              <li>
+                <strong>It reads the env files you already have.</strong>
+                <kbd>kcm use</kbd> merges <code>.env</code>,
+                <code>.env.&lt;mode&gt;</code>, <code>.env.local</code> and
+                <code>.env.&lt;mode&gt;.local</code> from the current folder
+                up to the git root, where <code>&lt;mode&gt;</code> is
+                <code>$NODE_ENV</code>. A variable already set in your shell
+                wins, as with dotenv.
+              </li>
+              <li>
+                <strong>Your teammates don't have to use it.</strong>
+                A small wrapper script runs a command through kcm when kcm is
+                installed, and as it is when it isn't. Someone without kcm, or
+                without a Mac, keeps real values in a gitignored
+                <code>.env.local</code>.
+              </li>
+              <li>
+                <strong>What a file scan sees</strong>
+                In a supply chain attack, a compromised dependency may scan your
+                <code>.env</code> files for secrets. After <kbd>kcm import</kbd>, that
+                scan finds <code>keychain://</code> references for the values you selected.
+                kcm is not for CI runners, production credentials, shared Macs
+                or highly sensitive data. Read the
+                <a href="https://github.com/tyom/kcm/blob/main/SECURITY.md"
+                  >security notes</a
+                >
+                before you rely on it.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="use-cases">
+        <div class="wrap">
+          <h2>Use cases</h2>
+          <div class="body">
+            <article class="case">
+              <h3 id="import">Move the secrets you already have</h3>
+              <p>
+                <kbd>kcm import</kbd> lists every plain value in your env
+                files with a masked preview and ticks the ones that look like
+                secrets.
+              </p>
+              <pre class="typed"><code>kcm import                  <span class="c"># scan env files from here up to the git root</span>
+kcm import -e .env.local    <span class="c"># or a single file</span></code></pre>
+              <p>
+                Tick the values you want to import and press Enter to review them.
+                kcm asks for confirmation before it stores anything or edits a file.
+                It reads each stored value back before replacing its line with a reference.
+              </p>
+              <p class="note picker-guide">
+                The first row shows <code>OPENAI_API_KEY</code> in <code>./.env.local</code>
+                with the masked value <code>sk-p…9f2c</code>. kcm ticks it because
+                the name contains <code>KEY</code> and the value starts with <code>sk-</code>.
+                Scroll the example sideways to read the other rows' notes.
+              </p>
+              <pre class="term" tabindex="0" role="region" aria-label="Sample kcm import picker"><code>       NAME                    FILE          VALUE      NOTES
+<span class="cur">&gt; [x]  OPENAI_API_KEY          ./.env.local  sk-p…9f2c  name has KEY, starts with sk-</span>
+<span class="g">  [x]  STRIPE_KEY              ./.env.local  sk_l…a1b2  name has KEY, starts with sk_live_ · in Keychain, same value</span>
+<span class="y">  [x]  GITHUB_TOKEN            ./.env.local  ghp_…0123  name has TOKEN, starts with ghp_ · in Keychain, different value</span>
+  [ ]  EXPO_PUBLIC_SENTRY_DSN  ./.env.local  http…6848  name has DSN, looks random · public, so unticked
+  [ ]  PORT                    ./.env        ****
+<span class="d">  ✓    DATABASE_URL            ./.env.local             keychain://DATABASE_URL</span>
+<span class="y">  !    REDIS_URL               ./.env.local             keychain://REDIS_URL missing from Keychain</span>
+<span class="d">↑/↓ move  space toggle  a all  enter continue  q quit</span></code></pre>
+              <ul class="legend">
+                <li>
+                  <code class="chip">[x]</code>
+                  <span>A plain value selected for import.</span>
+                </li>
+                <li>
+                  <code class="chip g">[x]</code>
+                  <span>
+                    Green: your Keychain already has this name with the same value. kcm only
+                    replaces the line with a reference.
+                  </span>
+                </li>
+                <li>
+                  <code class="chip y">[x]</code>
+                  <span>
+                    Yellow: your Keychain already has this name with a different value. kcm asks
+                    what to do after you press Enter.
+                  </span>
+                </li>
+                <li>
+                  <code class="chip y">!</code>
+                  <span>
+                    Yellow with <code>!</code>: the line is already a reference, but its Keychain
+                    entry is missing. You can't tick it.
+                  </span>
+                </li>
+                <li>
+                  <code class="chip d">✓</code>
+                  <span>
+                    Dimmed: the line is already a reference and its Keychain entry exists. Nothing
+                    to do.
+                  </span>
+                </li>
+              </ul>
+              <p>
+                kcm keeps no backup of the file, because a backup would hold
+                the plain values. Quitting at any prompt changes nothing.
+              </p>
+              <p>
+                <strong>Rotate any secret you import from a file that git tracks.</strong>
+                The old value stays in git history.
+              </p>
+            </article>
+
+            <article class="case">
+              <h3 id="share-scripts">Share scripts with people who don't use kcm</h3>
+              <p>Add a small wrapper to the repo.</p>
+              <pre class="typed" data-copy><code>kcm install-wrapper</code></pre>
+              <p class="note">
+                kcm asks where to put it. The default is <kbd>scripts/with-env</kbd>.
+              </p>
+              <p>
+                Commit the wrapper and call it from your scripts, for example
+                in <code>package.json</code>.
+              </p>
+              <pre class="typed"><code>"scripts": {
+  "dev": "scripts/with-env vite"
+}</code></pre>
+              <p>
+                Everyone runs <kbd>npm run dev</kbd>. If kcm is installed, the wrapper
+                uses it to start Vite. Otherwise it starts Vite directly, and Vite
+                reads <code>.env.local</code>.
+              </p>
+              <p>
+                Keep <code><mark>keychain://</mark></code> references out of committed env
+                files. Each person puts them in a gitignored
+                <code>.env.local</code>, and people without kcm put real values
+                there.
+              </p>
+              <p>
+                Without kcm the wrapper loads no env files. Next.js also reads
+                <code>.env.local</code> itself. Node with dotenv and Docker Compose
+                read only <code>.env</code> by default, so point them at
+                <code>.env.local</code>. A plain shell script has to load the values itself.
+              </p>
+            </article>
+
+            <article class="case">
+              <h3 id="new-project">Start a new project</h3>
+              <p>Add each secret once. kcm asks for the value.</p>
+              <pre class="typed"><code>kcm add DATABASE_URL
+kcm add STRIPE_KEY</code></pre>
+              <p>
+                After each one it prints the line to put in your
+                <code>.env.local</code> file.
+              </p>
+              <pre><code>DATABASE_URL="<span class="ref"><mark>keychain://</mark>DATABASE_URL</span>"</code></pre>
+              <p>
+                Then run any command with the references filled in. kcm finds
+                and merges <code>.env</code> files from the current folder up
+                to the git root.
+              </p>
+              <pre class="typed" data-copy><code>kcm use -- npm run dev</code></pre>
+            </article>
+
+            <article class="case">
+              <h3 id="one-script">Give one script its own credentials</h3>
+              <p>
+                Store a second set of credentials under different names, then
+                point the names the script reads at them in a separate env
+                file.
+              </p>
+              <pre class="typed"><code>kcm add STAGING_AWS_ACCESS_KEY_ID
+kcm add STAGING_AWS_SECRET_ACCESS_KEY</code></pre>
+              <p>
+                Make sure git ignores <code>.env.staging</code>, then add these
+                two entries to that file.
+              </p>
+              <pre class="typed"><code>AWS_ACCESS_KEY_ID="<span class="ref"><mark>keychain://</mark>STAGING_AWS_ACCESS_KEY_ID</span>"
+AWS_SECRET_ACCESS_KEY="<span class="ref"><mark>keychain://</mark>STAGING_AWS_SECRET_ACCESS_KEY</span>"</code></pre>
+              <p>
+                <kbd>--env-file</kbd> loads only that file.
+                <kbd>--override</kbd> uses its values even if your shell
+                already exports AWS credentials.
+              </p>
+              <pre class="typed" data-copy><code>kcm use --override --env-file .env.staging -- ./deploy.sh</code></pre>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="install">
+        <div class="wrap">
+          <h2>Install</h2>
+          <div class="body">
+            <article class="case">
+              <h3 id="homebrew">With Homebrew</h3>
+              <p>Use kcm for development secrets on your own Mac.</p>
+              <pre class="typed" data-copy><code>brew install tyom/tap/kcm</code></pre>
+            </article>
+
+            <article class="case">
+              <h3 id="by-hand">By hand</h3>
+              <p>Download the script from the main branch.</p>
+              <pre class="typed" data-copy><code>curl -O https://raw.githubusercontent.com/tyom/kcm/main/kcm</code></pre>
+              <p>Read the script with <kbd>less kcm</kbd>. When you're ready, install it.</p>
+              <pre class="typed" data-copy><code>chmod +x kcm
+sudo mv kcm /usr/local/bin/</code></pre>
+            </article>
+
+            <article class="case">
+              <h3 id="first-run">The first run</h3>
+              <p>
+                The first time kcm reads a secret, macOS asks for your password
+                or Touch ID. Choose "Always Allow" to stop it asking again for
+                that secret.
+              </p>
+            </article>
+
+            <article class="case">
+              <h3 id="stop-using-kcm">Stop using kcm</h3>
+              <p>
+                <kbd>kcm export -e .env.local -o .env.local.plain</kbd> writes the
+                real values to a new file. Then
+                <kbd>mv .env.local.plain .env.local</kbd> puts them back in the file
+                your app reads. Comments in the file are not kept.
+              </p>
+              <p>
+                Check your app still works. Then <kbd>kcm remove NAME</kbd> deletes
+                the Keychain entry for <code>NAME</code>. The
+                <a href="https://github.com/tyom/kcm#readme">README</a>
+                covers every command.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <span>Created by Tyom Semonov. MIT licence.</span>
+        <ul>
+          <li><a href="https://github.com/tyom/kcm">Source on GitHub</a></li>
+          <li>
+            <a href="https://github.com/tyom/kcm/blob/main/SECURITY.md"
+              >Security</a
+            >
+          </li>
+          <li>
+            <a href="https://github.com/tyom/kcm/releases">Releases</a>
+          </li>
+        </ul>
+      </div>
+    </footer>
+
+    <script>
+      console.log("No secrets in this console either. They're in the Keychain.\nhttps://github.com/tyom/kcm");
+
+      if (navigator.clipboard) {
+        for (const pre of document.querySelectorAll("pre[data-copy]")) {
+          const box = document.createElement("div");
+          box.className = "copyable";
+          pre.replaceWith(box);
+          const code = pre.cloneNode(true);
+          // Comments stay out: an interactive zsh would pass "# ..." to the command as arguments
+          code.querySelectorAll(".c").forEach((c) => c.remove());
+          const text = code.textContent.split("\n").map((line) => line.trimEnd()).filter(Boolean).join("\n");
+
+          const button = document.createElement("button");
+          button.type = "button";
+          button.setAttribute("aria-live", "polite");
+          const label = document.createElement("span");
+          label.textContent = "Copy";
+          // Read out with the label, so six buttons are not all just "Copy"
+          const what = document.createElement("span");
+          what.className = "vh";
+          what.textContent = " " + text.split("\n")[0];
+          button.append(label, what);
+
+          let reset;
+          const say = (message, ms) => {
+            label.textContent = message;
+            clearTimeout(reset);
+            reset = setTimeout(() => (label.textContent = "Copy"), ms);
+          };
+          button.onclick = async () => {
+            try {
+              await navigator.clipboard.writeText(text);
+              say("Copied", 1500);
+            } catch {
+              // The browser refused: select the command so one keystroke still copies it
+              getSelection().selectAllChildren(pre);
+              say("Selected. Press \u2318C", 4000);
+            }
+          };
+          box.append(pre, button);
+        }
+      }
+    </script>
+  </body>
+</html>

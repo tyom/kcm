@@ -7,7 +7,7 @@ A secure command-line utility for managing secrets in macOS Keychain with seamle
 ## Features
 
 - **Secure Storage**: Store sensitive data in macOS Keychain instead of plain text files
-- **Environment Integration**: Seamlessly resolve `keychain://` placeholders in `.env` files
+- **Environment Integration**: Seamlessly resolve `keychain://` references in `.env` files
 - **Env File Discovery**: Find and merge `.env` files from the current folder up to the git root. Variables already in your environment win
 - **Import**: Move plain values from `.env` files into Keychain and replace them with `keychain://` references
 - **Export**: Resolve env files into plain values in a file or on the clipboard, for example to share them
@@ -210,7 +210,7 @@ Commit it and use it in scripts, for example in `package.json`:
 For this to work for everyone:
 
 - Keep `keychain://` references out of committed env files. Each person puts them in `.env.local` (gitignored). People without kcm put real values there instead.
-- Without kcm, the wrapper loads no env files. That's fine for tools that read `.env` themselves, such as Vite, Next.js, Node with dotenv or Docker Compose. A plain shell script that needs the values must load them in its fallback, for example with `set -a; . ./.env.local; set +a`. That runs the file as shell code, so it has to be valid shell.
+- Without kcm, the wrapper loads no env files. That's fine for Vite and Next.js, which read `.env.local` themselves. Node with dotenv and Docker Compose read only `.env` by default, so point them at the file: `require('dotenv').config({ path: '.env.local' })` or `docker compose --env-file .env.local`. A plain shell script that needs the values must load them in its fallback, for example with `set -a; . ./.env.local; set +a`. That runs the file as shell code, so it has to be valid shell.
 
 ### Inspecting what `use` loads
 
@@ -303,8 +303,8 @@ kcm add DATABASE_URL
 kcm add STRIPE_KEY
 kcm add SENDGRID_KEY
 
-# Create your .env file
-cat > .env << EOF
+# Create your .env.local file and keep it out of git
+cat > .env.local << EOF
 DATABASE_URL="keychain://DATABASE_URL"
 STRIPE_KEY="keychain://STRIPE_KEY"
 SENDGRID_KEY="keychain://SENDGRID_KEY"
@@ -337,7 +337,7 @@ kcm reads the Keychain of the logged-in user, so it is for your own machine, not
 
 ### Team Collaboration
 
-Share `.env` files with `keychain://` placeholders in your repository. Each team member stores their own credentials locally:
+Keep `keychain://` references out of committed env files. Each team member stores their own credentials in the Keychain and keeps the references in a gitignored `.env.local`:
 
 ```bash
 # Team member setup
@@ -348,11 +348,17 @@ cd project
 kcm add DATABASE_URL  # Enter their dev database URL
 kcm add API_KEY        # Enter their personal API key
 
+# and puts the references in their own .env.local
+cat > .env.local << EOF
+DATABASE_URL="keychain://DATABASE_URL"
+API_KEY="keychain://API_KEY"
+EOF
+
 # Everyone can now run the app with their own credentials
 kcm use -- npm start
 ```
 
-To let teammates skip kcm and keep plain values in their `.env.local`, see [Optional kcm in shared scripts](#optional-kcm-in-shared-scripts).
+A teammate who doesn't use kcm, or isn't on a Mac, puts real values in `.env.local` instead. To call kcm from committed scripts without making it a requirement, see [Optional kcm in shared scripts](#optional-kcm-in-shared-scripts).
 
 ## Requirements
 
